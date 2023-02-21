@@ -5,7 +5,7 @@
 apt -y install libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good python3-pip ruby
 apt -y install git flex bison 
 
-pip install meson
+pip3 install meson
 #dirty fix for meson not being found when not in /usr/bin
 cp /usr/local/bin/meson /usr/bin/meson
 

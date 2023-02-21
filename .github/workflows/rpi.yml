@@ -50,7 +50,7 @@ jobs:
             ninja -C build install
             tree
             cd /tmp/gst-plugins-good/usr/lib/arm-linux-gnueabihf/gstreamer-1.0/
-            #sudo cp libgstqmlgl.so ../
+            # sudo cp libgstqmlgl.so ../
             # sudo cp libgstrpicamsrc.so ../ 
             # sudo mv ../libgstqmlgl.so .
             # sudo mv ../libgstrpicamsrc.so .
