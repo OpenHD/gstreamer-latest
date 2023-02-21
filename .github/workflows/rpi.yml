@@ -47,7 +47,7 @@ jobs:
             echo "/opt/Qt5.15.4/lib/" >/etc/ld.so.conf.d/qt.conf
             sudo ldconfig
             export PATH="$PATH:/opt/Qt5.15.4/bin/"
-            meson --prefix /tmp/gst-plugins-good/usr build
+            meson --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good:qt5=enabled build
             ninja -C build
             ninja -C build install
             tree
