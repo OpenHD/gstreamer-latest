@@ -45,11 +45,7 @@ jobs:
             echo "/opt/Qt5.15.4/lib/" >/etc/ld.so.conf.d/qt.conf
             sudo ldconfig
             export PATH="$PATH:/opt/Qt5.15.4/bin/"
-            meson --prefix=/tmp/gst-plugins-good/usr -Dbad=disabled -Dlibav=disabled -Dugly=disabled -Dgood=disabled -Dgst-plugins-good:qt5=enabled build            
-            ninja -C build
-            ninja -C build install
-            cd subprojects/gst-plugins-good
-            meson --prefix /tmp/gst-plugins-good/usr build
+            meson --prefix=/tmp/gst-plugins-good/usr -Dbad=disabled -Dlibav=disabled -Dugly=disabled -Dgood=disabled -Dgst-plugins-good:qt5=enabled -Dgst-plugins-good:rpicamsrc=enabled build            
             ninja -C build
             ninja -C build install
             # sudo cp libgstqmlgl.so ../
