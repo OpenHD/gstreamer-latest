@@ -2,7 +2,7 @@
 
 # Install all the dependencies needed to build QOpenHD from source.
 
-apt -y install libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good python3 ruby
+apt -y install libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good python3-pip ruby
 apt -y install git flex bison 
 
 pip install meson
