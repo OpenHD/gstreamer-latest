@@ -1,0 +1,91 @@
+name: Build raspberry
+
+on: [push]
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+    steps:
+       
+    - uses: actions/checkout@v2
+      with:
+        submodules: recursive
+        
+    - name: Emulating Raspberry Pi 4
+      id: qemu
+    - uses: pguyot/arm-runner-action@v2.5.2
+      with:
+        base_image: https://downloads.raspberrypi.org/raspios_oldstable_armhf/images/raspios_oldstable_armhf-2022-04-07/2022-04-04-raspios-buster-armhf.img.xz
+        image_additional_mb: 4000
+        copy_repository_path: /opt
+        copy_artifact_path: gst-plugins-good
+        import_github_env: true
+        cpu: cortex-a7
+        commands: |
+            ls -a
+            cd /opt
+            sudo apt update -y
+            sudo apt upgrade -y
+            sudo apt install -y ruby-dev
+            echo "test --------------------------------------------------------------------------------------------"
+            echo "deb http://deb.debian.org/debian buster-backports main" >> /etc/apt/sources.list.d/backports.list
+            apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0E98404D386FA1D9
+            apt update 
+            apt install libboost1.74-dev/buster-backports libboost1.74-all-dev/buster-backports cmake/buster-backports -y
+            apt update
+            curl -1sLf 'https://dl.cloudsmith.io/public/openhd/openhd-2-3-evo/setup.deb.sh' | sudo -E bash
+            sudo apt install -y openhd-qt meson ninja-build
+            sudo bash gst-plugins-good/install_dep.sh
+            git clone https://github.com/GStreamer/gst-plugins-good
+            cd gst-plugins-good
+            git checkout 1.14
+            meson --prefix /tmp/gst-plugins-good/usr build
+            ninja -C build
+            ninja -C build install
+            # cd /tmp/gst-plugins-good/usr/lib/arm-linux-gnueabihf/gstreamer-1.0/
+            # sudo cp libgstqmlgl.so ../
+            # sudo cp libgstrpicamsrc.so ../ 
+            # sudo rm -Rf *
+            # sudo mv ../libgstqmlgl.so .
+            # sudo mv ../libgstrpicamsrc.so .
+            # cd /opt/gst-plugins-good
+            fpm -a armhf -s dir -t deb -n gst-plugins-good -v 2.3-evo -C /tmp/gst-plugins-good -p gst-plugins-good-2.2.0-evo.deb
+            ls -a
+
+
+    - name: Upload to Github
+      uses: 'actions/upload-artifact@v2'
+      with:
+        name: "gst-plugins-good"
+        path: |
+          gst-plugins-good/gst-plugins-good/*.deb
+          
+    - name: Push
+      id: push
+      uses: cloudsmith-io/action@master
+      with:
+        api-key: ${{ secrets.CLOUDSMITH_API_KEY }}
+        command: "push"
+        format: "deb"
+        owner: "openhd"
+        repo: "openhd-2-3-evo"
+        distro: "raspbian"
+        release: "buster"
+        republish: "true" # needed ONLY if version is not changing
+        file: "gst-plugins-good/gst-plugins-good/*.deb"
+          
+      #- name: Install
+      #  run: |
+      #    cd OpenHD/build
+      #    sudo cmake --install .
+      #- name: Build ninja
+      #  run: |
+      #    sudo apt -y install ninja-build
+      #    cd OpenHD
+      #    ./build_cmake.sh
