@@ -55,6 +55,7 @@ jobs:
             meson --prefix=/tmp/gst-plugins-good/usr -Drpicamsrc=enabled -Dqt5=enabled build
             ninja -C build
             ninja -C build install
+            cd ../../
             # sudo cp libgstqmlgl.so ../
             # sudo cp libgstrpicamsrc.so ../ 
             # sudo mv ../libgstqmlgl.so .
@@ -68,7 +69,7 @@ jobs:
       with:
         name: "gst-plugins-good"
         path: |
-          gst-plugins-good/*.deb
+          gstreamer-latest/*.deb
           
     - name: Push
       id: push
@@ -82,7 +83,7 @@ jobs:
         distro: "raspbian"
         release: "bullseye"
         republish: "true" # needed ONLY if version is not changing
-        file: "gst-plugins-good/*.deb"
+        file: "gstreamer-latest/*.deb"
           
       #- name: Install
       #  run: |
