@@ -86,6 +86,12 @@ struct GstNvEncResource : public GstMiniObject
 
 GST_DEFINE_MINI_OBJECT_TYPE (GstNvEncResource, gst_nv_enc_resource);
 
+static void
+gst_nv_enc_task_clear_sei (NV_ENC_SEI_PAYLOAD * payload)
+{
+  g_clear_pointer (&payload->payload, g_free);
+}
+
 struct GstNvEncTask : public GstMiniObject
 {
   GstNvEncTask (const std::string & parent_id, guint seq)
@@ -96,6 +102,16 @@ struct GstNvEncTask : public GstMiniObject
 
     event_params.version = gst_nvenc_get_event_params_version ();
     bitstream.version = gst_nvenc_get_lock_bitstream_version ();
+
+    sei_payload = g_array_new (FALSE, FALSE, sizeof (NV_ENC_SEI_PAYLOAD));
+    g_array_set_clear_func (sei_payload,
+        (GDestroyNotify) gst_nv_enc_task_clear_sei);
+  }
+
+  ~GstNvEncTask ()
+  {
+    if (sei_payload)
+      g_array_unref (sei_payload);
   }
 
   std::shared_ptr<GstNvEncObject> object;
@@ -114,6 +130,8 @@ struct GstNvEncTask : public GstMiniObject
   bool locked = false;
   std::string id;
   guint seq_num;
+
+  GArray *sei_payload;
 };
 
 GST_DEFINE_MINI_OBJECT_TYPE (GstNvEncTask, gst_nv_enc_task);
@@ -271,6 +289,12 @@ GstNvEncObject::InitSession (NV_ENC_INITIALIZE_PARAMS * params,
     return NV_ENC_ERR_INVALID_CALL;
   }
 
+  if (memcmp (&params->encodeGUID, &NV_ENC_CODEC_H264_GUID, sizeof (GUID)) == 0) {
+    codec_ = GST_NV_ENC_CODEC_H264;
+  } else {
+    codec_ = GST_NV_ENC_CODEC_H265;
+  }
+
   info_ = *info;
   switch (GST_VIDEO_INFO_FORMAT (info)) {
     case GST_VIDEO_FORMAT_NV12:
@@ -343,6 +367,7 @@ GstNvEncObject::InitSession (NV_ENC_INITIALIZE_PARAMS * params,
   }
 
   task_size_ = task_size;
+  lookahead_ = params->encodeConfig->rcParams.lookaheadDepth;
   initialized_ = true;
 
 out:
@@ -410,6 +435,19 @@ GstNvEncObject::Encode (GstVideoCodecFrame * codec_frame,
   params.inputDuration = codec_frame->duration;
   params.outputBitstream = task->output_ptr;
   params.pictureStruct = pic_struct;
+  if (task->sei_payload->len > 0) {
+    if (codec_ == GST_NV_ENC_CODEC_H264) {
+      params.codecPicParams.h264PicParams.seiPayloadArray =
+          &g_array_index (task->sei_payload, NV_ENC_SEI_PAYLOAD, 0);
+      params.codecPicParams.h264PicParams.seiPayloadArrayCnt =
+          task->sei_payload->len;
+    } else {
+      params.codecPicParams.hevcPicParams.seiPayloadArray =
+          &g_array_index (task->sei_payload, NV_ENC_SEI_PAYLOAD, 0);
+      params.codecPicParams.hevcPicParams.seiPayloadArrayCnt =
+          task->sei_payload->len;
+    }
+  }
 
   if (GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (codec_frame))
     params.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
@@ -453,8 +491,34 @@ GstNvEncObject::Encode (GstVideoCodecFrame * codec_frame,
       active_resource_queue_.insert (task->resource);
   }
 
-  task_queue_.push (task);
-  cond_.notify_all ();
+  /* On Windows and if async encoding is enabled, output thread will wait
+   * for completion event. But on Linux, async encoding is not supported.
+   * So, we should wait for NV_ENC_SUCCESS in case of sync mode
+   * (it would introduce latency though).
+   * Otherwise nvEncLockBitstream() will return error */
+  if (params.completionEvent) {
+    /* Windows only path */
+    task_queue_.push (task);
+    cond_.notify_all ();
+  } else {
+    pending_task_queue_.push (task);
+    if (status == NV_ENC_SUCCESS) {
+      bool notify = false;
+
+      /* XXX: nvEncLockBitstream() will return NV_ENC_ERR_INVALID_PARAM
+       * if lookahead is enabled. See also
+       * https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/-/merge_requests/494
+       */
+      while (pending_task_queue_.size() > lookahead_) {
+        notify = true;
+        task_queue_.push (pending_task_queue_.front ());
+        pending_task_queue_.pop ();
+      }
+
+      if (notify)
+        cond_.notify_all ();
+    }
+  }
 
   return NV_ENC_SUCCESS;
 }
@@ -493,6 +557,11 @@ GstNvEncObject::Drain (GstNvEncTask * task)
 
     break;
   } while (true);
+
+  while (!pending_task_queue_.empty ()) {
+    task_queue_.push (pending_task_queue_.front ());
+    pending_task_queue_.pop ();
+  }
 
   task_queue_.push (task);
   cond_.notify_all ();
@@ -840,6 +909,7 @@ GstNvEncObject::AcquireTask (GstNvEncTask ** task, bool force)
   g_assert (!new_task->object);
 
   new_task->object = shared_from_this ();
+  g_array_set_size (new_task->sei_payload, 0);
 
   *task = new_task;
 
@@ -1060,6 +1130,12 @@ gst_nv_enc_task_set_resource (GstNvEncTask * task,
   return TRUE;
 }
 
+GArray *
+gst_nv_enc_task_get_sei_payload (GstNvEncTask * task)
+{
+  return task->sei_payload;
+}
+
 NVENCSTATUS
 gst_nv_enc_task_lock_bitstream (GstNvEncTask * task,
     NV_ENC_LOCK_BITSTREAM * bitstream)
@@ -1105,6 +1181,8 @@ gst_nv_enc_task_dispose (GstNvEncTask * task)
   GST_TRACE_ID (task->id.c_str (), "Disposing task %u", task->seq_num);
 
   object = task->object;
+
+  g_array_set_size (task->sei_payload, 0);
 
   if (task->resource) {
     object->DeactivateResource (task->resource);

@@ -26,6 +26,10 @@
 #include <gst/d3d11/gstd3d11.h>
 #endif
 
+#ifdef HAVE_CUDA_GST_GL
+#include <gst/gl/gl.h>
+#endif
+
 #include <string.h>
 
 #include <gst/cuda/gstcuda.h>
@@ -79,6 +83,16 @@ typedef enum
   GST_NV_ENCODER_RC_MODE_CBR_HQ,
   GST_NV_ENCODER_RC_MODE_VBR_HQ,
 } GstNvEncoderRCMode;
+
+#define GST_TYPE_NV_ENCODER_SEI_INSERT_MODE (gst_nv_encoder_sei_insert_mode_get_type ())
+GType gst_nv_encoder_sei_insert_mode_get_type (void);
+
+typedef enum
+{
+  GST_NV_ENCODER_SEI_INSERT,
+  GST_NV_ENCODER_SEI_INSERT_AND_DROP,
+  GST_NV_ENCODER_SEI_DISABLED,
+} GstNvEncoderSeiInsertMode;
 
 typedef struct
 {

@@ -27,6 +27,8 @@
 #include <gst/cuda/gstcudamemory.h>
 #include <gst/cuda/gstcudabufferpool.h>
 #include <gst/cuda/gstcudastream.h>
+#include <gst/cuda/gstcuda-private.h>
+#include <gst/base/gstbytewriter.h>
 #include <string.h>
 #include <mutex>
 #include <condition_variable>
@@ -36,10 +38,6 @@
 #include "gstnvencobject.h"
 
 #ifdef G_OS_WIN32
-#include <gst/d3d11/gstd3d11.h>
-#endif
-
-#ifdef G_OS_WIN32
 #include <wrl.h>
 
 /* *INDENT-OFF* */
@@ -47,11 +45,23 @@ using namespace Microsoft::WRL;
 /* *INDENT-ON* */
 #endif
 
+#ifdef HAVE_CUDA_GST_GL
+#define SUPPORTED_GL_APIS GST_GL_API_OPENGL3
+#endif
+
 GST_DEBUG_CATEGORY (gst_nv_encoder_debug);
 #define GST_CAT_DEFAULT gst_nv_encoder_debug
 
 #define GST_NVENC_STATUS_FORMAT "s (%d)"
 #define GST_NVENC_STATUS_ARGS(s) nvenc_status_to_string (s), s
+
+enum
+{
+  PROP_0,
+  PROP_CC_INSERT,
+};
+
+#define DEFAULT_CC_INSERT GST_NV_ENCODER_SEI_INSERT
 
 struct _GstNvEncoderPrivate
 {
@@ -67,6 +77,14 @@ struct _GstNvEncoderPrivate
 #ifdef G_OS_WIN32
   GstD3D11Device *device = nullptr;
   GstD3D11Fence *fence = nullptr;
+#endif
+
+#ifdef HAVE_CUDA_GST_GL
+  GstGLDisplay *gl_display = nullptr;
+  GstGLContext *gl_context = nullptr;
+  GstGLContext *other_gl_context = nullptr;
+
+  gboolean gl_interop = FALSE;
 #endif
 
   std::shared_ptr < GstNvEncObject > object;
@@ -93,6 +111,9 @@ struct _GstNvEncoderPrivate
   std::unique_ptr < std::thread > encoding_thread;
 
   std::atomic < GstFlowReturn > last_flow;
+
+  /* properties */
+  GstNvEncoderSeiInsertMode cc_insert = DEFAULT_CC_INSERT;
 };
 
 /**
@@ -104,6 +125,10 @@ struct _GstNvEncoderPrivate
 G_DEFINE_ABSTRACT_TYPE (GstNvEncoder, gst_nv_encoder, GST_TYPE_VIDEO_ENCODER);
 
 static void gst_nv_encoder_finalize (GObject * object);
+static void gst_nv_encoder_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec);
+static void gst_nv_encoder_get_property (GObject * object, guint prop_id,
+    GValue * value, GParamSpec * pspec);
 static void gst_nv_encoder_set_context (GstElement * element,
     GstContext * context);
 static gboolean gst_nv_encoder_open (GstVideoEncoder * encoder);
@@ -123,6 +148,8 @@ static GstFlowReturn gst_nv_encoder_handle_frame (GstVideoEncoder *
     encoder, GstVideoCodecFrame * frame);
 static GstFlowReturn gst_nv_encoder_finish (GstVideoEncoder * encoder);
 static gboolean gst_nv_encoder_flush (GstVideoEncoder * encoder);
+static gboolean gst_nv_encoder_transform_meta (GstVideoEncoder * encoder,
+    GstVideoCodecFrame * frame, GstMeta * meta);
 
 static void
 gst_nv_encoder_class_init (GstNvEncoderClass * klass)
@@ -132,6 +159,21 @@ gst_nv_encoder_class_init (GstNvEncoderClass * klass)
   GstVideoEncoderClass *videoenc_class = GST_VIDEO_ENCODER_CLASS (klass);
 
   object_class->finalize = gst_nv_encoder_finalize;
+  object_class->set_property = gst_nv_encoder_set_property;
+  object_class->get_property = gst_nv_encoder_get_property;
+
+  /**
+   * GstNvEncoder:cc-insert:
+   *
+   * Closed Caption insert mode
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (object_class, PROP_CC_INSERT,
+      g_param_spec_enum ("cc-insert", "Closed Caption Insert",
+          "Closed Caption Insert mode",
+          GST_TYPE_NV_ENCODER_SEI_INSERT_MODE, DEFAULT_CC_INSERT,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   element_class->set_context = GST_DEBUG_FUNCPTR (gst_nv_encoder_set_context);
 
@@ -148,6 +190,8 @@ gst_nv_encoder_class_init (GstNvEncoderClass * klass)
       GST_DEBUG_FUNCPTR (gst_nv_encoder_handle_frame);
   videoenc_class->finish = GST_DEBUG_FUNCPTR (gst_nv_encoder_finish);
   videoenc_class->flush = GST_DEBUG_FUNCPTR (gst_nv_encoder_flush);
+  videoenc_class->transform_meta =
+      GST_DEBUG_FUNCPTR (gst_nv_encoder_transform_meta);
 
   GST_DEBUG_CATEGORY_INIT (gst_nv_encoder_debug, "nvencoder", 0, "nvencoder");
 
@@ -155,6 +199,8 @@ gst_nv_encoder_class_init (GstNvEncoderClass * klass)
   gst_type_mark_as_plugin_api (GST_TYPE_NV_ENCODER_PRESET,
       (GstPluginAPIFlags) 0);
   gst_type_mark_as_plugin_api (GST_TYPE_NV_ENCODER_RC_MODE,
+      (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_NV_ENCODER_SEI_INSERT_MODE,
       (GstPluginAPIFlags) 0);
 }
 
@@ -178,6 +224,40 @@ gst_nv_encoder_finalize (GObject * object)
 }
 
 static void
+gst_nv_encoder_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  GstNvEncoder *self = GST_NV_ENCODER (object);
+  GstNvEncoderPrivate *priv = self->priv;
+
+  switch (prop_id) {
+    case PROP_CC_INSERT:
+      priv->cc_insert = (GstNvEncoderSeiInsertMode) g_value_get_enum (value);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_nv_encoder_get_property (GObject * object, guint prop_id, GValue * value,
+    GParamSpec * pspec)
+{
+  GstNvEncoder *self = GST_NV_ENCODER (object);
+  GstNvEncoderPrivate *priv = self->priv;
+
+  switch (prop_id) {
+    case PROP_CC_INSERT:
+      g_value_set_enum (value, priv->cc_insert);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
 gst_nv_encoder_set_context (GstElement * element, GstContext * context)
 {
   GstNvEncoder *self = GST_NV_ENCODER (element);
@@ -195,6 +275,13 @@ gst_nv_encoder_set_context (GstElement * element, GstContext * context)
     case GST_NV_ENCODER_DEVICE_CUDA:
       gst_cuda_handle_set_context (element, context, priv->cuda_device_id,
           &priv->context);
+#ifdef HAVE_CUDA_GST_GL
+      if (gst_gl_handle_set_context (element, context, &priv->gl_display,
+              &priv->other_gl_context)) {
+        if (priv->gl_display)
+          gst_gl_display_filter_gl_api (priv->gl_display, SUPPORTED_GL_APIS);
+      }
+#endif
       break;
     default:
       break;
@@ -376,6 +463,11 @@ gst_nv_encoder_close (GstVideoEncoder * encoder)
   gst_clear_d3d11_fence (&priv->fence);
   gst_clear_object (&priv->device);
 #endif
+#ifdef HAVE_CUDA_GST_GL
+  gst_clear_object (&priv->gl_display);
+  gst_clear_object (&priv->gl_context);
+  gst_clear_object (&priv->other_gl_context);
+#endif
 
   return TRUE;
 }
@@ -422,6 +514,56 @@ gst_nv_encoder_sink_event (GstVideoEncoder * encoder, GstEvent * event)
   return GST_VIDEO_ENCODER_CLASS (parent_class)->sink_event (encoder, event);
 }
 
+#ifdef HAVE_CUDA_GST_GL
+static void
+gst_nv_encoder_check_cuda_device_from_gl_context (GstGLContext * context,
+    gboolean * ret)
+{
+  guint device_count = 0;
+  CUdevice device_list[1] = { 0, };
+  CUresult cuda_ret;
+
+  *ret = FALSE;
+
+  cuda_ret = CuGLGetDevices (&device_count,
+      device_list, 1, CU_GL_DEVICE_LIST_ALL);
+
+  if (!gst_cuda_result (cuda_ret) || device_count == 0)
+    return;
+
+  *ret = TRUE;
+}
+
+static gboolean
+gst_nv_encoder_ensure_gl_context (GstNvEncoder * self)
+{
+  GstNvEncoderPrivate *priv = self->priv;
+  gboolean ret = FALSE;
+
+  std::unique_lock < std::recursive_mutex > lk (priv->context_lock);
+
+  if (!gst_gl_ensure_element_data (GST_ELEMENT (self), &priv->gl_display,
+          &priv->other_gl_context)) {
+    GST_DEBUG_OBJECT (self, "Couldn't get GL display");
+    return FALSE;
+  }
+
+  gst_gl_display_filter_gl_api (priv->gl_display, SUPPORTED_GL_APIS);
+
+  if (!gst_gl_display_ensure_context (priv->gl_display, priv->other_gl_context,
+          &priv->gl_context, nullptr)) {
+    GST_DEBUG_OBJECT (self, "Couldn't get GL context");
+    return FALSE;
+  }
+
+  gst_gl_context_thread_add (priv->gl_context,
+      (GstGLContextThreadFunc) gst_nv_encoder_check_cuda_device_from_gl_context,
+      &ret);
+
+  return ret;
+}
+#endif
+
 static gboolean
 gst_nv_encoder_handle_context_query (GstNvEncoder * self, GstQuery * query)
 {
@@ -438,13 +580,38 @@ gst_nv_encoder_handle_context_query (GstNvEncoder * self, GstQuery * query)
       break;
 #endif
     case GST_NV_ENCODER_DEVICE_CUDA:
+#ifdef HAVE_CUDA_GST_GL
+    {
+      GstGLDisplay *display = nullptr;
+      GstGLContext *other = nullptr;
+      GstGLContext *local = nullptr;
+
+      if (priv->gl_display)
+        display = (GstGLDisplay *) gst_object_ref (priv->gl_display);
+      if (priv->gl_context)
+        local = (GstGLContext *) gst_object_ref (priv->gl_context);
+      if (priv->other_gl_context)
+        other = (GstGLContext *) gst_object_ref (priv->other_gl_context);
+
+      lk.unlock ();
+      ret = gst_gl_handle_context_query (GST_ELEMENT (self), query,
+          display, local, other);
+      lk.lock ();
+
+      gst_clear_object (&display);
+      gst_clear_object (&other);
+      gst_clear_object (&local);
+
+      if (ret)
+        return ret;
+    }
+#endif
       ret = gst_cuda_handle_context_query (GST_ELEMENT (self),
           query, priv->context);
       break;
     default:
       break;
   }
-
 
   return ret;
 }
@@ -544,6 +711,25 @@ gst_nv_encoder_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
       break;
 #endif
     case GST_NV_ENCODER_DEVICE_CUDA:
+#ifdef HAVE_CUDA_GST_GL
+      if (features && gst_caps_features_contains (features,
+              GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
+        GST_DEBUG_OBJECT (self, "upstream support GL memory");
+        if (!gst_nv_encoder_ensure_gl_context (self)) {
+          GST_WARNING_OBJECT (self, "Couldn't get GL context");
+          priv->gl_interop = FALSE;
+          gst_query_add_allocation_meta (query,
+              GST_VIDEO_META_API_TYPE, nullptr);
+          gst_query_add_allocation_pool (query,
+              nullptr, info.size, min_buffers, 0);
+          return TRUE;
+        }
+
+        pool = gst_gl_buffer_pool_new (priv->gl_context);
+        break;
+      }
+#endif
+
       if (features && gst_caps_features_contains (features,
               GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY)) {
         GST_DEBUG_OBJECT (self, "upstream support CUDA memory");
@@ -561,7 +747,6 @@ gst_nv_encoder_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
 
   config = gst_buffer_pool_get_config (pool);
   gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
-
 
   size = GST_VIDEO_INFO_SIZE (&info);
   gst_buffer_pool_config_set_params (config, caps, size, min_buffers, 0);
@@ -935,9 +1120,6 @@ gst_nv_encoder_init_session (GstNvEncoder * self, GstBuffer * in_buf)
           if (priv->stream)
             gst_cuda_stream_ref (priv->stream);
         }
-
-        if (!priv->stream)
-          priv->stream = gst_cuda_stream_new (priv->context);
       }
     }
 #ifdef G_OS_WIN32
@@ -1079,6 +1261,18 @@ gst_nv_encoder_set_format (GstVideoEncoder * encoder,
   priv->input_state = gst_video_codec_state_ref (state);
   priv->last_flow = GST_FLOW_OK;
 
+#ifdef HAVE_CUDA_GST_GL
+  {
+    GstCapsFeatures *features = gst_caps_get_features (state->caps, 0);
+    if (gst_caps_features_contains (features,
+            GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
+      priv->gl_interop = TRUE;
+    } else {
+      priv->gl_interop = FALSE;
+    }
+  }
+#endif
+
   /* select device again on next buffer */
   if (priv->subclass_device_mode == GST_NV_ENCODER_DEVICE_AUTO_SELECT)
     priv->selected_device_mode = GST_NV_ENCODER_DEVICE_AUTO_SELECT;
@@ -1137,9 +1331,174 @@ gst_nv_encoder_copy_system (GstNvEncoder * self, const GstVideoInfo * info,
   return GST_FLOW_OK;
 }
 
+#ifdef HAVE_CUDA_GST_GL
+static GstCudaGraphicsResource *
+gst_nv_encoder_ensure_gl_cuda_resource (GstNvEncoder * self, GstMemory * mem)
+{
+  GQuark quark;
+  GstNvEncoderPrivate *priv = self->priv;
+  GstCudaGraphicsResource *resource;
+
+  if (!gst_is_gl_memory_pbo (mem)) {
+    GST_WARNING_OBJECT (self, "memory is not GL PBO memory, %s",
+        mem->allocator->mem_type);
+    return nullptr;
+  }
+
+  quark = gst_cuda_quark_from_id (GST_CUDA_QUARK_GRAPHICS_RESOURCE);
+  resource = (GstCudaGraphicsResource *)
+      gst_mini_object_get_qdata (GST_MINI_OBJECT (mem), quark);
+
+  if (!resource) {
+    GstMapInfo map_info;
+    GstGLMemoryPBO *pbo = (GstGLMemoryPBO *) mem;
+    GstGLBuffer *gl_buf = pbo->pbo;
+    gboolean ret;
+
+    if (!gst_memory_map (mem, &map_info,
+            (GstMapFlags) (GST_MAP_READ | GST_MAP_GL))) {
+      GST_ERROR_OBJECT (self, "Couldn't map gl memory");
+      return nullptr;
+    }
+
+    resource = gst_cuda_graphics_resource_new (priv->context,
+        GST_OBJECT (GST_GL_BASE_MEMORY_CAST (mem)->context),
+        GST_CUDA_GRAPHICS_RESOURCE_GL_BUFFER);
+
+    GST_LOG_OBJECT (self, "registering gl buffer %d to CUDA", gl_buf->id);
+    ret = gst_cuda_graphics_resource_register_gl_buffer (resource, gl_buf->id,
+        CU_GRAPHICS_REGISTER_FLAGS_NONE);
+    gst_memory_unmap (mem, &map_info);
+
+    if (!ret) {
+      GST_ERROR_OBJECT (self, "Couldn't register gl buffer %d", gl_buf->id);
+      gst_cuda_graphics_resource_free (resource);
+      return nullptr;
+    }
+
+    gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), quark, resource,
+        (GDestroyNotify) gst_cuda_graphics_resource_free);
+  }
+
+  return resource;
+}
+
+struct GstNvEncGLInteropData
+{
+  GstNvEncoder *self = nullptr;
+  GstBuffer *in_buf = nullptr;
+  GstBuffer *out_buf = nullptr;
+};
+
+static void
+gst_nv_encoder_upload_gl (GstGLContext * context, GstNvEncGLInteropData * data)
+{
+  GstNvEncoder *self = data->self;
+  GstNvEncoderPrivate *priv = self->priv;
+  CUDA_MEMCPY2D copy_param;
+  GstCudaGraphicsResource *gst_res[GST_VIDEO_MAX_PLANES] = { nullptr, };
+  CUgraphicsResource cuda_res[GST_VIDEO_MAX_PLANES] = { nullptr, };
+  CUdeviceptr src_devptr[GST_VIDEO_MAX_PLANES] = { 0, };
+  const GstVideoInfo *info = &priv->input_state->info;
+  CUstream stream = gst_cuda_stream_get_handle (priv->stream);
+  GstCudaMemory *cmem;
+  GstMapInfo map_info;
+  CUresult cuda_ret;
+  gboolean ret = FALSE;
+
+  gst_cuda_context_push (priv->context);
+
+  for (guint i = 0; i < GST_VIDEO_INFO_N_PLANES (info); i++) {
+    GstMemory *mem = gst_buffer_peek_memory (data->in_buf, i);
+    GstGLMemoryPBO *pbo = (GstGLMemoryPBO *) mem;
+    gsize src_size;
+
+    if (!gst_is_gl_memory_pbo (mem)) {
+      GST_ERROR_OBJECT (self, "Not a GL PBO memory");
+      goto out;
+    }
+
+    gst_res[i] = gst_nv_encoder_ensure_gl_cuda_resource (self, mem);
+    if (!gst_res[i]) {
+      GST_ERROR_OBJECT (self, "Couldn't get resource %d", i);
+      goto out;
+    }
+
+    gst_gl_memory_pbo_upload_transfer (pbo);
+    gst_gl_memory_pbo_download_transfer (pbo);
+
+    cuda_res[i] = gst_cuda_graphics_resource_map (gst_res[i], stream,
+        CU_GRAPHICS_MAP_RESOURCE_FLAGS_READ_ONLY);
+    if (!cuda_res[i]) {
+      GST_ERROR_OBJECT (self, "Couldn't map resource");
+      goto out;
+    }
+
+    cuda_ret = CuGraphicsResourceGetMappedPointer (&src_devptr[i],
+        &src_size, cuda_res[i]);
+    if (!gst_cuda_result (cuda_ret)) {
+      GST_ERROR_OBJECT (self, "Couldn't get mapped device pointer");
+      goto out;
+    }
+  }
+
+  if (gst_buffer_pool_acquire_buffer (priv->internal_pool,
+          &data->out_buf, nullptr) != GST_FLOW_OK) {
+    GST_ERROR_OBJECT (self, "Couldn't acquire fallback buffer");
+    goto out;
+  }
+
+  cmem = (GstCudaMemory *) gst_buffer_peek_memory (data->out_buf, 0);
+  if (!gst_memory_map (GST_MEMORY_CAST (cmem), &map_info,
+          (GstMapFlags) (GST_MAP_WRITE | GST_MAP_CUDA))) {
+    GST_ERROR_OBJECT (self, "Couldn't map fallback memory");
+    goto out;
+  }
+
+  memset (&copy_param, 0, sizeof (CUDA_MEMCPY2D));
+
+  for (guint i = 0; i < GST_VIDEO_INFO_N_PLANES (info); i++) {
+    copy_param.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy_param.srcDevice = src_devptr[i];
+    copy_param.srcPitch = GST_VIDEO_INFO_PLANE_STRIDE (info, i);
+
+    copy_param.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy_param.dstDevice = ((CUdeviceptr) map_info.data) + cmem->info.offset[i];
+    copy_param.dstPitch = cmem->info.stride[0];
+
+    copy_param.WidthInBytes = GST_VIDEO_INFO_COMP_WIDTH (info, i) *
+        GST_VIDEO_INFO_COMP_PSTRIDE (info, i);
+    copy_param.Height = GST_VIDEO_INFO_COMP_HEIGHT (info, i);
+
+    if (!gst_cuda_result (CuMemcpy2DAsync (&copy_param, stream))) {
+      gst_memory_unmap (GST_MEMORY_CAST (cmem), &map_info);
+      GST_ERROR_OBJECT (self, "Couldn't copy plane %d", i);
+      goto out;
+    }
+  }
+
+  gst_memory_unmap (GST_MEMORY_CAST (cmem), &map_info);
+
+  ret = TRUE;
+
+out:
+  for (guint i = 0; i < gst_buffer_n_memory (data->in_buf); i++) {
+    if (!gst_res[i])
+      break;
+
+    gst_cuda_graphics_resource_unmap (gst_res[i], stream);
+  }
+
+  CuStreamSynchronize (stream);
+  gst_cuda_context_pop (nullptr);
+  if (!ret)
+    gst_clear_buffer (&data->out_buf);
+}
+#endif /* HAVE_CUDA_GST_GL */
+
 static GstFlowReturn
 gst_nv_encoder_prepare_task_input_cuda (GstNvEncoder * self,
-    const GstVideoInfo * info, GstBuffer * buffer, GstNvEncTask * task)
+    GstBuffer * buffer, GstNvEncTask * task)
 {
   GstNvEncoderPrivate *priv = self->priv;
   std::shared_ptr < GstNvEncObject > object = priv->object;
@@ -1148,8 +1507,43 @@ gst_nv_encoder_prepare_task_input_cuda (GstNvEncoder * self,
   NVENCSTATUS status;
   GstCudaStream *stream;
   GstNvEncResource *resource = nullptr;
+  const GstVideoInfo *info = &priv->input_state->info;
 
   mem = gst_buffer_peek_memory (buffer, 0);
+
+#ifdef HAVE_CUDA_GST_GL
+  if (priv->gl_interop) {
+    if (gst_is_gl_memory (mem) && gst_buffer_n_memory (buffer) ==
+        GST_VIDEO_INFO_N_PLANES (info)) {
+      GstNvEncGLInteropData gl_data;
+      GstGLMemory *gl_mem = (GstGLMemory *) mem;
+      gl_data.self = self;
+      gl_data.in_buf = buffer;
+      gl_data.out_buf = nullptr;
+      gst_gl_context_thread_add (gl_mem->mem.context,
+          (GstGLContextThreadFunc) gst_nv_encoder_upload_gl, &gl_data);
+      if (gl_data.out_buf) {
+        mem = gst_buffer_peek_memory (gl_data.out_buf, 0);
+        status = object->AcquireResource (mem, &resource);
+
+        if (status != NV_ENC_SUCCESS) {
+          gst_buffer_unref (gl_data.out_buf);
+          GST_ERROR_OBJECT (self, "Failed to get resource, status %"
+              GST_NVENC_STATUS_FORMAT, GST_NVENC_STATUS_ARGS (status));
+          return GST_FLOW_ERROR;
+        }
+
+        gst_nv_enc_task_set_resource (task, gl_data.out_buf, resource);
+
+        return GST_FLOW_OK;
+      } else {
+        GST_WARNING_OBJECT (self, "GL interop failed");
+        priv->gl_interop = FALSE;
+      }
+    }
+  }
+#endif
+
   if (!gst_is_cuda_memory (mem)) {
     GST_LOG_OBJECT (self, "Not a CUDA buffer, system copy");
     return gst_nv_encoder_copy_system (self, info, buffer, task);
@@ -1341,8 +1735,7 @@ gst_nv_encoder_upload_d3d11_frame (GstNvEncoder * self,
 
 static GstFlowReturn
 gst_nv_encoder_prepare_task_input_d3d11 (GstNvEncoder * self,
-    const GstVideoInfo * info, GstBuffer * buffer,
-    GstBufferPool * pool, GstNvEncTask * task)
+    GstBuffer * buffer, GstNvEncTask * task)
 {
   GstNvEncoderPrivate *priv = self->priv;
   std::shared_ptr < GstNvEncObject > object = priv->object;
@@ -1351,6 +1744,8 @@ gst_nv_encoder_prepare_task_input_d3d11 (GstNvEncoder * self,
   NVENCSTATUS status;
   GstBuffer *upload_buffer = nullptr;
   GstNvEncResource *resource = nullptr;
+  const GstVideoInfo *info = &priv->input_state->info;
+  GstBufferPool *pool = priv->internal_pool;
 
   if (gst_buffer_n_memory (buffer) > 1) {
     GST_LOG_OBJECT (self, "Not a native DXGI format, system copy");
@@ -1404,8 +1799,7 @@ gst_nv_encoder_prepare_task_input_d3d11 (GstNvEncoder * self,
 
 static GstFlowReturn
 gst_nv_encoder_prepare_task_input (GstNvEncoder * self,
-    const GstVideoInfo * info, GstBuffer * buffer,
-    GstBufferPool * pool, GstNvEncTask * task)
+    GstBuffer * buffer, GstNvEncTask * task)
 {
   GstNvEncoderPrivate *priv = self->priv;
   GstFlowReturn ret = GST_FLOW_ERROR;
@@ -1413,12 +1807,11 @@ gst_nv_encoder_prepare_task_input (GstNvEncoder * self,
   switch (priv->selected_device_mode) {
 #ifdef G_OS_WIN32
     case GST_NV_ENCODER_DEVICE_D3D11:
-      ret = gst_nv_encoder_prepare_task_input_d3d11 (self, info, buffer,
-          pool, task);
+      ret = gst_nv_encoder_prepare_task_input_d3d11 (self, buffer, task);
       break;
 #endif
     case GST_NV_ENCODER_DEVICE_CUDA:
-      ret = gst_nv_encoder_prepare_task_input_cuda (self, info, buffer, task);
+      ret = gst_nv_encoder_prepare_task_input_cuda (self, buffer, task);
       break;
     default:
       g_assert_not_reached ();
@@ -1426,6 +1819,69 @@ gst_nv_encoder_prepare_task_input (GstNvEncoder * self,
   }
 
   return ret;
+}
+
+static gboolean
+gst_nv_encoder_foreach_caption_meta (GstBuffer * buffer, GstMeta ** meta,
+    GArray * payload)
+{
+  GstVideoCaptionMeta *cc_meta;
+  GstByteWriter br;
+  guint payload_size;
+  NV_ENC_SEI_PAYLOAD sei_payload;
+
+  if ((*meta)->info->api != GST_VIDEO_CAPTION_META_API_TYPE)
+    return TRUE;
+
+  cc_meta = (GstVideoCaptionMeta *) (*meta);
+
+  if (cc_meta->caption_type != GST_VIDEO_CAPTION_TYPE_CEA708_RAW)
+    return TRUE;
+
+  /* 1 byte contry_code + 10 bytes CEA-708 specific data + caption data */
+  payload_size = 11 + cc_meta->size;
+
+  gst_byte_writer_init_with_size (&br, payload_size, FALSE);
+
+  /* 8-bits itu_t_t35_country_code */
+  gst_byte_writer_put_uint8 (&br, 181);
+
+  /* 16-bits itu_t_t35_provider_code */
+  gst_byte_writer_put_uint8 (&br, 0);
+  gst_byte_writer_put_uint8 (&br, 49);
+
+  /* 32-bits ATSC_user_identifier */
+  gst_byte_writer_put_uint8 (&br, 'G');
+  gst_byte_writer_put_uint8 (&br, 'A');
+  gst_byte_writer_put_uint8 (&br, '9');
+  gst_byte_writer_put_uint8 (&br, '4');
+
+  /* 8-bits ATSC1_data_user_data_type_code */
+  gst_byte_writer_put_uint8 (&br, 3);
+
+  /* 8-bits:
+   * 1 bit process_em_data_flag (0)
+   * 1 bit process_cc_data_flag (1)
+   * 1 bit additional_data_flag (0)
+   * 5-bits cc_count
+   */
+  gst_byte_writer_put_uint8 (&br, ((cc_meta->size / 3) & 0x1f) | 0x40);
+
+  /* 8 bits em_data, unused */
+  gst_byte_writer_put_uint8 (&br, 255);
+
+  gst_byte_writer_put_data (&br, cc_meta->data, cc_meta->size);
+
+  /* 8 marker bits */
+  gst_byte_writer_put_uint8 (&br, 255);
+
+  sei_payload.payloadSize = gst_byte_writer_get_pos (&br);
+  sei_payload.payloadType = 4;
+  sei_payload.payload = gst_byte_writer_reset_and_get_data (&br);
+
+  g_array_append_val (payload, sei_payload);
+
+  return TRUE;
 }
 
 static GstFlowReturn
@@ -1499,8 +1955,7 @@ gst_nv_encoder_handle_frame (GstVideoEncoder * encoder,
   }
 
   gst_nv_encoder_device_lock (self);
-  ret = gst_nv_encoder_prepare_task_input (self, &priv->input_state->info,
-      in_buf, priv->internal_pool, task);
+  ret = gst_nv_encoder_prepare_task_input (self, in_buf, task);
   gst_nv_encoder_device_unlock (self);
 
   if (ret != GST_FLOW_OK) {
@@ -1509,6 +1964,12 @@ gst_nv_encoder_handle_frame (GstVideoEncoder * encoder,
     gst_video_encoder_finish_frame (encoder, frame);
 
     return ret;
+  }
+
+  if (priv->cc_insert != GST_NV_ENCODER_SEI_DISABLED) {
+    gst_buffer_foreach_meta (in_buf,
+        (GstBufferForeachMetaFunc) gst_nv_encoder_foreach_caption_meta,
+        gst_nv_enc_task_get_sei_payload (task));
   }
 
   status = priv->object->Encode (frame,
@@ -1550,6 +2011,33 @@ gst_nv_encoder_flush (GstVideoEncoder * encoder)
   priv->last_flow = GST_FLOW_OK;
 
   return TRUE;
+}
+
+static gboolean
+gst_nv_encoder_transform_meta (GstVideoEncoder * encoder,
+    GstVideoCodecFrame * frame, GstMeta * meta)
+{
+  GstNvEncoder *self = GST_NV_ENCODER (encoder);
+  GstNvEncoderPrivate *priv = self->priv;
+  GstVideoCaptionMeta *cc_meta;
+
+  /* We need to handle only case CC meta should be dropped */
+  if (priv->cc_insert != GST_NV_ENCODER_SEI_INSERT_AND_DROP)
+    goto out;
+
+  if (meta->info->api != GST_VIDEO_CAPTION_META_API_TYPE)
+    goto out;
+
+  cc_meta = (GstVideoCaptionMeta *) meta;
+  if (cc_meta->caption_type != GST_VIDEO_CAPTION_TYPE_CEA708_RAW)
+    goto out;
+
+  /* Don't copy this meta into output buffer */
+  return FALSE;
+
+out:
+  return GST_VIDEO_ENCODER_CLASS (parent_class)->transform_meta (encoder,
+      frame, meta);
 }
 
 void
@@ -1682,6 +2170,48 @@ gst_nv_encoder_rc_mode_to_native (GstNvEncoderRCMode rc_mode)
   }
 
   return NV_ENC_PARAMS_RC_VBR;
+}
+
+/**
+ * GstNvEncoderSeiInsertMode:
+ *
+ * Since: 1.24
+ */
+GType
+gst_nv_encoder_sei_insert_mode_get_type (void)
+{
+  static GType type = 0;
+  static const GEnumValue insert_modes[] = {
+    /**
+     * GstNvEncoderSeiInsertMode::insert:
+     *
+     * Since: 1.24
+     */
+    {GST_NV_ENCODER_SEI_INSERT, "Insert SEI", "insert"},
+
+    /**
+     * GstNvEncoderSeiInsertMode::insert-and-drop:
+     *
+     * Since: 1.24
+     */
+    {GST_NV_ENCODER_SEI_INSERT_AND_DROP,
+          "Insert SEI and remove corresponding meta from output buffer",
+        "insert-and-drop"},
+
+    /**
+     * GstNvEncoderSeiInsertMode::disabled:
+     *
+     * Since: 1.24
+     */
+    {GST_NV_ENCODER_SEI_DISABLED, "Disable SEI insertion", "disabled"},
+    {0, nullptr, nullptr}
+  };
+
+  GST_CUDA_CALL_ONCE_BEGIN {
+    type = g_enum_register_static ("GstNvEncoderSeiInsertMode", insert_modes);
+  } GST_CUDA_CALL_ONCE_END;
+
+  return type;
 }
 
 GstNvEncoderClassData *
