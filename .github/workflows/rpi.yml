@@ -35,9 +35,10 @@ jobs:
         copy_artifact_path: gstreamer-latest
         import_github_env: true
         commands: |
-            sudo rpi-upgrade -y
             ls -a
             cd /opt
+            curl https://data.openhdfpv.org/openhd-images/BaseImages/vc.zip -o vc.zip -s
+            unzip vc.zip  
             cd gstreamer-latest
             apt update
             curl -1sLf 'https://dl.cloudsmith.io/public/openhd/openhd-2-3-evo/setup.deb.sh' | sudo -E bash
@@ -52,10 +53,6 @@ jobs:
             meson --prefix=/tmp/gst-plugins-good/usr -Dbad=disabled -Dlibav=disabled -Dugly=disabled -Dgood=enabled -Dgst-plugins-good:qt5=enabled -Dgst-plugins-good:rpicamsrc=enabled build            
             ninja -C build
             ninja -C build install
-            # sudo cp libgstqmlgl.so ../
-            # sudo cp libgstrpicamsrc.so ../ 
-            # sudo mv ../libgstqmlgl.so .
-            # sudo mv ../libgstrpicamsrc.so .
             fpm -a armhf -s dir -t deb -n gst-plugins-good -v 2.3-evo -C /tmp/gst-plugins-good -p gst-plugins-good-2.3-evo.deb
             ls -a
 
@@ -63,7 +60,7 @@ jobs:
     - name: Upload to Github
       uses: 'actions/upload-artifact@v2'
       with:
-        name: "gst-plugins-good"
+        name: "gstreamer-latest"
         path: |
           gstreamer-latest/*.deb
           
