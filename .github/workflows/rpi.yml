@@ -35,6 +35,7 @@ jobs:
         copy_artifact_path: gstreamer-latest
         import_github_env: true
         commands: |
+            sudo rpi-upgrade -y
             ls -a
             cd /opt
             cd gstreamer-latest
@@ -48,14 +49,9 @@ jobs:
             rm -Rf /usr/bin/qmake
             sudo ln -s /opt/Qt5.15.4/bin/qmake /usr/bin/qmake
             export PATH="$PATH:/opt/Qt5.15.4/bin/"
-            meson --prefix=/tmp/gst-plugins-good/usr -Dbad=disabled -Dlibav=disabled -Dugly=disabled -Dgood=disabled build            
+            meson --prefix=/tmp/gst-plugins-good/usr -Dbad=disabled -Dlibav=disabled -Dugly=disabled -Dgood=enabled -Dgst-plugins-good:qt5=enabled -Dgst-plugins-good:rpicamsrc=enabled build            
             ninja -C build
             ninja -C build install
-            cd subprojects/gst-plugins-good/
-            meson --prefix=/tmp/gst-plugins-good/usr -Drpicamsrc=enabled -Dqt5=enabled build
-            ninja -C build
-            ninja -C build install
-            cd ../../
             # sudo cp libgstqmlgl.so ../
             # sudo cp libgstrpicamsrc.so ../ 
             # sudo mv ../libgstqmlgl.so .
