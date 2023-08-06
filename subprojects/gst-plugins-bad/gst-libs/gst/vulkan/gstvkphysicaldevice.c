@@ -24,6 +24,7 @@
 
 #include "gstvkphysicaldevice.h"
 
+#include "gstvkphysicaldevice-private.h"
 #include "gstvkdebug.h"
 
 #include <string.h>
@@ -260,6 +261,7 @@ gst_vulkan_physical_device_finalize (GObject * object)
   g_free (priv->available_extensions);
   priv->available_extensions = NULL;
 
+  g_free (device->queue_family_ops);
   g_free (device->queue_family_props);
   device->queue_family_props = NULL;
 
@@ -559,10 +561,11 @@ dump_queue_properties (GstVulkanPhysicalDevice * device, GError ** error)
         queue_family_props[i].queueFlags);
     GST_LOG_OBJECT (device,
         "queue family at index %i supports %i queues "
-        "with flags (0x%x) \'%s\', %" G_GUINT32_FORMAT " timestamp bits and "
-        "a minimum image transfer granuality of %" GST_VULKAN_EXTENT3D_FORMAT,
-        i, device->queue_family_props[i].queueCount,
+        "with flags (0x%x) \'%s\', video operations (0x%x), %" G_GUINT32_FORMAT
+        " timestamp bits and a minimum image transfer granuality of %"
+        GST_VULKAN_EXTENT3D_FORMAT, i, device->queue_family_props[i].queueCount,
         device->queue_family_props[i].queueFlags, queue_flags_str,
+        device->queue_family_ops[i].video,
         device->queue_family_props[i].timestampValidBits,
         GST_VULKAN_EXTENT3D_ARGS (device->
             queue_family_props[i].minImageTransferGranularity));
@@ -1003,22 +1006,55 @@ gst_vulkan_physical_device_fill_info (GstVulkanPhysicalDevice * device,
     if (device->n_queue_families > 0) {
       VkQueueFamilyProperties2 *props;
       int i;
+      void *next = NULL;
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+      VkQueueFamilyVideoPropertiesKHR *queue_family_video_props;
+      VkQueueFamilyQueryResultStatusPropertiesKHR *queue_family_query_props;
 
+      queue_family_video_props =
+          g_new0 (VkQueueFamilyVideoPropertiesKHR, device->n_queue_families);
+      queue_family_query_props =
+          g_new0 (VkQueueFamilyQueryResultStatusPropertiesKHR,
+          device->n_queue_families);
+#endif
       props = g_new0 (VkQueueFamilyProperties2, device->n_queue_families);
       for (i = 0; i < device->n_queue_families; i++) {
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+        queue_family_query_props[i].sType =
+            VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR;
+
+        queue_family_video_props[i].sType =
+            VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR;
+        queue_family_video_props[i].pNext = &queue_family_query_props[i];
+
+        next = &queue_family_video_props[i];
+#endif
         props[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
-        props[i].pNext = NULL;
+        props[i].pNext = next;
       }
 
       get_queue_props2 (device->device, &device->n_queue_families, props);
 
       device->queue_family_props =
           g_new0 (VkQueueFamilyProperties, device->n_queue_families);
+      device->queue_family_ops =
+          g_new0 (GstVulkanQueueFamilyOps, device->n_queue_families);
       for (i = 0; i < device->n_queue_families; i++) {
         memcpy (&device->queue_family_props[i], &props[i].queueFamilyProperties,
             sizeof (device->queue_family_props[i]));
+
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+        device->queue_family_ops[i].video =
+            queue_family_video_props[i].videoCodecOperations;
+        device->queue_family_ops[i].query =
+            queue_family_query_props[i].queryResultStatusSupport;
+#endif
       }
       g_free (props);
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+      g_free (queue_family_video_props);
+      g_free (queue_family_query_props);
+#endif
     }
   } else
 #endif
@@ -1189,4 +1225,19 @@ gst_vulkan_physical_device_get_extension_info (GstVulkanPhysicalDevice * device,
   GST_OBJECT_UNLOCK (device);
 
   return ret;
+}
+
+const VkPhysicalDeviceFeatures2 *
+gst_vulkan_physical_device_get_features (GstVulkanPhysicalDevice * device)
+{
+#if defined (VK_API_VERSION_1_2)
+  GstVulkanPhysicalDevicePrivate *priv;
+
+  g_return_val_if_fail (GST_IS_VULKAN_PHYSICAL_DEVICE (device), FALSE);
+
+  priv = GET_PRIV (device);
+  if (gst_vulkan_instance_check_version (device->instance, 1, 2, 0))
+    return &priv->features10;
+#endif
+  return NULL;
 }

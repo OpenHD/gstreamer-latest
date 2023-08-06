@@ -611,9 +611,9 @@ gst_dash_demux_class_init (GstDashDemuxClass * klass)
       "DASH Demuxer",
       "Codec/Demuxer/Adaptive",
       "Dynamic Adaptive Streaming over HTTP demuxer",
-      "David Corvoysier <david.corvoysier@orange.com>\n\
-                Hamid Zakari <hamid.zakari@gmail.com>\n\
-                Gianluca Gennari <gennarone@gmail.com>");
+      "David Corvoysier <david.corvoysier@orange.com>, "
+      "Hamid Zakari <hamid.zakari@gmail.com>, "
+      "Gianluca Gennari <gennarone@gmail.com>");
 
 
   gstadaptivedemux_class->get_duration = gst_dash_demux_get_duration;
@@ -2398,7 +2398,7 @@ gst_dash_demux_seek (GstAdaptiveDemux * demux, GstEvent * seek)
     return FALSE;
   }
 
-  trickmode_no_audio = ! !(flags & GST_SEEK_FLAG_TRICKMODE_NO_AUDIO);
+  trickmode_no_audio = !!(flags & GST_SEEK_FLAG_TRICKMODE_NO_AUDIO);
 
   streams = demux->streams;
   if (current_period != gst_mpd_client_get_period_index (dashdemux->client)) {

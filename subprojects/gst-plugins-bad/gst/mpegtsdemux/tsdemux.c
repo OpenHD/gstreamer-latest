@@ -52,8 +52,6 @@
 
 #include <math.h>
 
-#define _gst_log2(x) (log(x)/log(2))
-
 /*
  * tsdemux
  *
@@ -62,6 +60,9 @@
 
 #define CONTINUITY_UNSET 255
 #define MAX_CONTINUITY 15
+
+/* Length of metadata_AU_cell header, see ISO/IEC 13818-1:2018 Section 2.12.4 */
+#define PES_PACKET_METADATA_AU_HEADER_LEN 5
 
 /* Seeking/Scanning related variables */
 
@@ -449,7 +450,7 @@ gst_ts_demux_class_init (GstTSDemuxClass * klass)
       "MPEG transport stream demuxer",
       "Codec/Demuxer",
       "Demuxes MPEG2 transport streams",
-      "Zaheer Abbas Merali <zaheerabbas at merali dot org>\n"
+      "Zaheer Abbas Merali <zaheerabbas at merali dot org>, "
       "Edward Hervey <edward.hervey@collabora.co.uk>");
 
   ts_class = GST_MPEGTS_BASE_CLASS (klass);
@@ -1268,6 +1269,21 @@ gst_ts_demux_create_tags (TSDemuxStream * stream)
   const GstMpegtsDescriptor *desc = NULL;
   int i, nb;
 
+  if (bstream->stream_type == ST_PS_AUDIO_AC3 &&
+      !mpegts_get_descriptor_from_stream (bstream,
+          GST_MTS_DESC_DVB_ENHANCED_AC3)) {
+    const GstMpegtsDescriptor *ac3_desc =
+        mpegts_get_descriptor_from_stream (bstream,
+        GST_MTS_DESC_AC3_AUDIO_STREAM);
+    if (ac3_desc && DESC_AC_AUDIO_STREAM_has_lang1 (ac3_desc->data)) {
+      gchar lang_code[4];
+
+      memcpy (lang_code, DESC_AC_AUDIO_STREAM_lang1_code (ac3_desc->data), 3);
+      lang_code[3] = '\0';
+      add_iso639_language_to_tags (stream, lang_code);
+    }
+  }
+
   desc =
       mpegts_get_descriptor_from_stream (bstream,
       GST_MTS_DESC_ISO_639_LANGUAGE);
@@ -1514,7 +1530,7 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
             gst_byte_reader_init (&br, desc->data + 3, desc->length - 1);
             channel_config_code = gst_byte_reader_get_uint8_unchecked (&br);
 
-            if ((channel_config_code & 0x8f) <= 8) {
+            if (channel_config_code < 0x89) {
               static const guint8 coupled_stream_counts[9] = {
                 1, 0, 1, 1, 2, 2, 2, 3, 3
               };
@@ -1540,11 +1556,12 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
               };
 
               gint channels = -1, stream_count, coupled_count, mapping_family;
-              guint8 *channel_mapping = NULL;
+              guint8 channel_mapping[255] = { 0, };
 
               channels = channel_config_code ? (channel_config_code & 0x0f) : 2;
               if (channel_config_code == 0 || channel_config_code == 0x80) {
                 /* Dual Mono */
+                channels = 2;
                 mapping_family = 255;
                 if (channel_config_code == 0) {
                   stream_count = 1;
@@ -1553,7 +1570,6 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                   stream_count = 2;
                   coupled_count = 0;
                 }
-                channel_mapping = g_new0 (guint8, channels);
                 memcpy (channel_mapping, &channel_map_a[1], channels);
               } else if (channel_config_code <= 8) {
                 mapping_family = (channels > 2) ? 1 : 0;
@@ -1562,7 +1578,6 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                     coupled_stream_counts[channel_config_code];
                 coupled_count = coupled_stream_counts[channel_config_code];
                 if (mapping_family != 0) {
-                  channel_mapping = g_new0 (guint8, channels);
                   memcpy (channel_mapping, &channel_map_a[channels - 1],
                       channels);
                 }
@@ -1571,7 +1586,6 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                 mapping_family = 1;
                 stream_count = channels;
                 coupled_count = 0;
-                channel_mapping = g_new0 (guint8, channels);
                 memcpy (channel_mapping, &channel_map_b[channels - 1],
                     channels);
               } else if (channel_config_code == 0x81) {
@@ -1601,13 +1615,14 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                   guint8 stream_count_minus_one, coupled_stream_count;
                   gint stream_count_minus_one_len, coupled_stream_count_len;
                   gint channel_mapping_len, i;
+                  guint remaining_bytes;
 
+                  remaining_bytes = gst_byte_reader_get_remaining (&br);
                   gst_bit_reader_init (&breader,
                       gst_byte_reader_get_data_unchecked
-                      (&br, gst_byte_reader_get_remaining
-                          (&br)), gst_byte_reader_get_remaining (&br));
+                      (&br, remaining_bytes), remaining_bytes);
 
-                  stream_count_minus_one_len = ceil (_gst_log2 (channels));
+                  stream_count_minus_one_len = g_bit_storage (channels);
                   if (!gst_bit_reader_get_bits_uint8 (&breader,
                           &stream_count_minus_one,
                           stream_count_minus_one_len)) {
@@ -1618,8 +1633,7 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                   }
 
                   stream_count = stream_count_minus_one + 1;
-                  coupled_stream_count_len =
-                      ceil (_gst_log2 (stream_count_minus_one + 2));
+                  coupled_stream_count_len = g_bit_storage (stream_count + 1);
 
                   if (!gst_bit_reader_get_bits_uint8 (&breader,
                           &coupled_stream_count, coupled_stream_count_len)) {
@@ -1632,9 +1646,7 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                   coupled_count = coupled_stream_count;
 
                   channel_mapping_len =
-                      ceil (_gst_log2 (stream_count_minus_one + 1 +
-                          coupled_stream_count + 1));
-                  channel_mapping = g_new0 (guint8, channels);
+                      g_bit_storage (stream_count + coupled_stream_count + 1);
                   for (i = 0; i < channels; i++) {
                     if (!gst_bit_reader_get_bits_uint8 (&breader,
                             &channel_mapping[i], channel_mapping_len)) {
@@ -1647,8 +1659,6 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                   /* error above */
                   if (i != channels) {
                     channels = -1;
-                    g_free (channel_mapping);
-                    channel_mapping = NULL;
                     break;
                   }
                 }
@@ -1662,8 +1672,6 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
                     gst_codec_utils_opus_create_caps (48000, channels,
                     mapping_family, stream_count, coupled_count,
                     channel_mapping);
-
-                g_free (channel_mapping);
               }
             } else {
               GST_WARNING_OBJECT (demux,
@@ -1733,6 +1741,27 @@ create_pad_for_stream (MpegTSBase * base, MpegTSBaseStream * bstream,
       caps = gst_caps_new_simple ("video/mpeg",
           "mpegversion", G_TYPE_INT, 4,
           "systemstream", G_TYPE_BOOLEAN, FALSE, NULL);
+      break;
+    case GST_MPEGTS_STREAM_TYPE_METADATA_PES_PACKETS:
+      desc = mpegts_get_descriptor_from_stream (bstream, GST_MTS_DESC_METADATA);
+      if (desc) {
+        GstMpegtsMetadataDescriptor *metadataDescriptor;
+        if (gst_mpegts_descriptor_parse_metadata (desc, &metadataDescriptor)) {
+          if ((metadataDescriptor->metadata_format ==
+                  GST_MPEGTS_METADATA_FORMAT_IDENTIFIER_FIELD)
+              && (metadataDescriptor->metadata_format_identifier ==
+                  DRF_ID_KLVA)) {
+            sparse = TRUE;
+            is_private = TRUE;
+            /* registration_id is not correctly set or parsed for some streams */
+            bstream->registration_id = DRF_ID_KLVA;
+
+            caps = gst_caps_new_simple ("meta/x-klv",
+                "parsed", G_TYPE_BOOLEAN, TRUE, NULL);
+          }
+          g_free (metadataDescriptor);
+        }
+      }
       break;
     case GST_MPEGTS_STREAM_TYPE_VIDEO_H264:
       is_video = TRUE;
@@ -3316,6 +3345,74 @@ out:
   return gst_buffer_new_wrapped (stream->data, stream->current_size);
 }
 
+static GstBufferList *
+parse_pes_metadata_frame (TSDemuxStream * stream)
+{
+  GstByteReader reader;
+  GstBufferList *buffer_list = NULL;
+
+  buffer_list = gst_buffer_list_new ();
+  gst_byte_reader_init (&reader, stream->data, stream->current_size);
+
+  do {
+    GstBuffer *buffer;
+    GstMpegtsPESMetadataMeta *meta;
+    guint8 *au_data;
+    guint16 au_size;
+    guint8 service_id;
+    guint8 sequence_number;
+    guint8 flags;
+
+    if (gst_byte_reader_get_remaining (&reader) <
+        PES_PACKET_METADATA_AU_HEADER_LEN)
+      goto error;
+
+    if (!gst_byte_reader_get_uint8 (&reader, &service_id))
+      goto error;
+
+    if (!gst_byte_reader_get_uint8 (&reader, &sequence_number))
+      goto error;
+
+    if (!gst_byte_reader_get_uint8 (&reader, &flags))
+      goto error;
+
+    if (!gst_byte_reader_get_uint16_be (&reader, &au_size))
+      goto error;
+
+    if (gst_byte_reader_get_remaining (&reader) < au_size)
+      goto error;
+
+    if (!gst_byte_reader_dup_data (&reader, au_size, &au_data))
+      goto error;
+
+    buffer = gst_buffer_new_wrapped (au_data, au_size);
+    meta = gst_buffer_add_mpegts_pes_metadata_meta (buffer);
+    meta->metadata_service_id = service_id;
+    meta->flags = flags;
+    GST_DEBUG_OBJECT (stream->pad,
+        "metadata_service_id: 0x%02x, flags: 0x%02x, cell_data_length: 0x%04x",
+        meta->metadata_service_id, meta->flags, au_size);
+
+    gst_buffer_list_add (buffer_list, buffer);
+  } while (gst_byte_reader_get_remaining (&reader) > 0);
+
+  g_free (stream->data);
+  stream->data = NULL;
+  stream->current_size = 0;
+
+  return buffer_list;
+
+error:
+  {
+    GST_ERROR ("Failed to parse PES metadata access units");
+    g_free (stream->data);
+    stream->data = NULL;
+    stream->current_size = 0;
+    if (buffer_list)
+      gst_buffer_list_unref (buffer_list);
+    return NULL;
+  }
+}
 
 static GstFlowReturn
 gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
@@ -3365,24 +3462,18 @@ gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
       if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_PRIVATE_PES_PACKETS &&
           bs->registration_id == DRF_ID_OPUS) {
         buffer_list = parse_opus_access_unit (stream);
-        if (!buffer_list) {
-          res = GST_FLOW_ERROR;
-          goto beach;
-        }
-
-        if (gst_buffer_list_length (buffer_list) == 1) {
-          buffer = gst_buffer_ref (gst_buffer_list_get (buffer_list, 0));
-          gst_buffer_list_unref (buffer_list);
-          buffer_list = NULL;
-        }
       } else if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_VIDEO_JP2K) {
         buffer = parse_jp2k_access_unit (stream);
-        if (!buffer) {
-          res = GST_FLOW_ERROR;
-          goto beach;
-        }
+      } else if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_METADATA_PES_PACKETS
+          && bs->registration_id == DRF_ID_KLVA) {
+        buffer_list = parse_pes_metadata_frame (stream);
       } else {
         buffer = gst_buffer_new_wrapped (stream->data, stream->current_size);
+      }
+
+      if (buffer == NULL && buffer_list == NULL) {
+        res = GST_FLOW_ERROR;
+        goto beach;
       }
 
       stream->seeked_pts = stream->pts;
@@ -3419,30 +3510,19 @@ gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
     if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_PRIVATE_PES_PACKETS &&
         bs->registration_id == DRF_ID_OPUS) {
       buffer_list = parse_opus_access_unit (stream);
-      if (!buffer_list) {
-        res = GST_FLOW_ERROR;
-        goto beach;
-      }
-
-      if (gst_buffer_list_length (buffer_list) == 1) {
-        buffer = gst_buffer_ref (gst_buffer_list_get (buffer_list, 0));
-        gst_buffer_list_unref (buffer_list);
-        buffer_list = NULL;
-      }
     } else if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_VIDEO_JP2K) {
       buffer = parse_jp2k_access_unit (stream);
-      if (!buffer) {
-        res = GST_FLOW_ERROR;
-        goto beach;
-      }
     } else if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_AUDIO_AAC_ADTS) {
       buffer = parse_aac_adts_frame (stream);
-      if (!buffer) {
-        res = GST_FLOW_ERROR;
-        goto beach;
-      }
+    } else if (bs->stream_type == GST_MPEGTS_STREAM_TYPE_METADATA_PES_PACKETS
+        && bs->registration_id == DRF_ID_KLVA) {
+      buffer_list = parse_pes_metadata_frame (stream);
     } else {
       buffer = gst_buffer_new_wrapped (stream->data, stream->current_size);
+    }
+    if (buffer == NULL && buffer_list == NULL) {
+      res = GST_FLOW_ERROR;
+      goto beach;
     }
 
     if (G_UNLIKELY (stream->pending_ts && !check_pending_buffers (demux))) {
@@ -3471,6 +3551,13 @@ gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
           "Not enough information to push buffers yet, storing buffer");
       goto beach;
     }
+  }
+
+
+  if (buffer_list != NULL && gst_buffer_list_length (buffer_list) == 1) {
+    buffer = gst_buffer_ref (gst_buffer_list_get (buffer_list, 0));
+    gst_buffer_list_unref (buffer_list);
+    buffer_list = NULL;
   }
 
   if (G_UNLIKELY (stream->need_newsegment))

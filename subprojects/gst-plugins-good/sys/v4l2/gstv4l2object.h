@@ -136,6 +136,9 @@ struct _GstV4l2Object {
   /* the video-device's file descriptor */
   gint video_fd;
   GstV4l2IOMode mode;
+  GstPoll *poll;
+  GstPollFD pollfd;
+  gboolean can_poll_device;
 
   gboolean active;
 
@@ -145,6 +148,7 @@ struct _GstV4l2Object {
   GstVideoInfo info;
   GstVideoAlignment align;
   GstVideoTransferFunction transfer;
+  gsize plane_size[GST_VIDEO_MAX_PLANES];
 
   /* Features */
   gboolean need_video_meta;
@@ -279,7 +283,6 @@ gboolean     gst_v4l2_object_get_property_helper       (GstV4l2Object *v4l2objec
 gboolean     gst_v4l2_object_open            (GstV4l2Object * v4l2object, GstV4l2Error * error);
 gboolean     gst_v4l2_object_open_shared     (GstV4l2Object * v4l2object, GstV4l2Object * other);
 gboolean     gst_v4l2_object_close           (GstV4l2Object * v4l2object);
-gboolean     gst_v4l2_object_clear_format_list (GstV4l2Object * v4l2object);
 
 /* probing */
 
@@ -316,6 +319,11 @@ gboolean     gst_v4l2_object_propose_allocation (GstV4l2Object * obj, GstQuery *
 GstBufferPool * gst_v4l2_object_get_buffer_pool (GstV4l2Object * v4l2object);
 
 GstStructure * gst_v4l2_object_v4l2fourcc_to_structure (guint32 fourcc);
+
+GstFlowReturn  gst_v4l2_object_poll (GstV4l2Object * v4l2object, GstClockTime timeout);
+gboolean       gst_v4l2_object_subscribe_event (GstV4l2Object * v4l2object, guint32 event);
+
+gboolean     gst_v4l2_object_is_raw (GstV4l2Object * obj);
 
 /* crop / compose */
 gboolean     gst_v4l2_object_set_crop (GstV4l2Object * obj, struct v4l2_rect *result);

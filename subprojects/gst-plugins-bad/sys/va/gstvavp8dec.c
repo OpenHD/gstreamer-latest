@@ -176,7 +176,7 @@ _fill_quant_matrix (GstVp8Decoder * decoder, GstVp8Picture * picture,
   GstVaBaseDec *base = GST_VA_BASE_DEC (decoder);
   GstVp8FrameHdr const *frame_hdr = &picture->frame_hdr;
   GstVp8Segmentation *const seg = &parser->segmentation;
-  VAIQMatrixBufferVP8 iq_matrix = { };
+  VAIQMatrixBufferVP8 iq_matrix = { 0, };
   const gint8 QI_MAX = 127;
   gint16 qi, qi_base;
   gint i;
@@ -214,7 +214,7 @@ _fill_probability_table (GstVp8Decoder * decoder, GstVp8Picture * picture)
 {
   GstVaBaseDec *base = GST_VA_BASE_DEC (decoder);
   GstVp8FrameHdr const *frame_hdr = &picture->frame_hdr;
-  VAProbabilityDataBufferVP8 prob_table = { };
+  VAProbabilityDataBufferVP8 prob_table = { 0, };
 
   /* Fill in VAProbabilityDataBufferVP8 */
   memcpy (prob_table.dct_coeff_probs, frame_hdr->token_probs.prob,
@@ -357,7 +357,7 @@ _add_slice (GstVp8Decoder * decoder, GstVp8Picture * picture,
       sizeof (slice_param), (gpointer) picture->data, picture->size);
 }
 
-static gboolean
+static GstFlowReturn
 gst_va_vp8_dec_decode_picture (GstVp8Decoder * decoder, GstVp8Picture * picture,
     GstVp8Parser * parser)
 {
@@ -520,22 +520,9 @@ gst_va_vp8_dec_register (GstPlugin * plugin, GstVaDevice * device,
 
   type_info.class_data = cdata;
 
-  /* The first decoder to be registered should use a constant name,
-   * like vavp8dec, for any additional decoders, we create unique
-   * names, using inserting the render device name. */
-  if (device->index == 0) {
-    type_name = g_strdup ("GstVaVp8Dec");
-    feature_name = g_strdup ("vavp8dec");
-  } else {
-    gchar *basename = g_path_get_basename (device->render_device_path);
-    type_name = g_strdup_printf ("GstVa%sVp8Dec", basename);
-    feature_name = g_strdup_printf ("va%svp8dec", basename);
-    cdata->description = basename;
-
-    /* lower rank for non-first device */
-    if (rank > 0)
-      rank--;
-  }
+  gst_va_create_feature_name (device, "GstVaVp8Dec", "GstVa%sVp8Dec",
+      &type_name, "vavp8dec", "va%svp8dec", &feature_name,
+      &cdata->description, &rank);
 
   g_once (&debug_once, _register_debug_category, NULL);
 

@@ -141,7 +141,8 @@ static GstStaticPadTemplate videosink_templ =
         "video/x-vp9, "
         COMMON_VIDEO_CAPS "; "
         "video/x-raw, "
-        "format = (string) { YUY2, I420, YV12, UYVY, AYUV, GRAY8, BGR, RGB }, "
+        "format = (string) { YUY2, I420, YV12, UYVY, AYUV, GRAY8, GRAY10_LE32,"
+        " GRAY16_LE, BGR, RGB, RGBA64_LE, BGRA64_LE }, "
         COMMON_VIDEO_CAPS "; "
         "video/x-prores, "
         COMMON_VIDEO_CAPS "; "
@@ -180,7 +181,9 @@ static GstStaticPadTemplate audiosink_templ =
         COMMON_AUDIO_CAPS "; "
         "audio/x-flac, "
         COMMON_AUDIO_CAPS "; "
-        "audio/x-opus; "
+        "audio/x-opus, "
+        "channels = (int) [ 1, 8 ], "
+        "rate = (int) { 8000, 16000, 24000, 32000, 48000 }; "
         "audio/x-speex, "
         COMMON_AUDIO_CAPS "; "
         "audio/x-raw, "
@@ -1254,10 +1257,18 @@ skip_details:
         videocontext->fourcc = GST_STR_FOURCC (fstr);
       else if (!strcmp (fstr, "GRAY8"))
         videocontext->fourcc = GST_MAKE_FOURCC ('Y', '8', '0', '0');
+      else if (!strcmp (fstr, "GRAY10_LE32"))
+        videocontext->fourcc = GST_MAKE_FOURCC ('Y', '1', 0, 10);
+      else if (!strcmp (fstr, "GRAY16_LE"))
+        videocontext->fourcc = GST_MAKE_FOURCC ('Y', '1', 0, 16);
       else if (!strcmp (fstr, "BGR"))
         videocontext->fourcc = GST_MAKE_FOURCC ('B', 'G', 'R', 24);
       else if (!strcmp (fstr, "RGB"))
         videocontext->fourcc = GST_MAKE_FOURCC ('R', 'G', 'B', 24);
+      else if (!strcmp (fstr, "RGBA64_LE"))
+        videocontext->fourcc = GST_MAKE_FOURCC ('R', 'B', 'A', 64);
+      else if (!strcmp (fstr, "BGRA64_LE"))
+        videocontext->fourcc = GST_MAKE_FOURCC ('B', 'R', 'A', 64);
     }
   } else if (!strcmp (mimetype, "video/x-huffyuv")      /* MS/VfW compatibility cases */
       ||!strcmp (mimetype, "video/x-divx")
@@ -3444,21 +3455,21 @@ static const struct
 }
 gst_matroska_tag_conv[] = {
   {
-  GST_MATROSKA_TAG_ID_TITLE, GST_TAG_TITLE}, {
-  GST_MATROSKA_TAG_ID_ARTIST, GST_TAG_ARTIST}, {
-  GST_MATROSKA_TAG_ID_ALBUM, GST_TAG_ALBUM}, {
-  GST_MATROSKA_TAG_ID_COMMENTS, GST_TAG_COMMENT}, {
-  GST_MATROSKA_TAG_ID_BITSPS, GST_TAG_BITRATE}, {
-  GST_MATROSKA_TAG_ID_BPS, GST_TAG_BITRATE}, {
-  GST_MATROSKA_TAG_ID_ENCODER, GST_TAG_ENCODER}, {
-  GST_MATROSKA_TAG_ID_DATE, GST_TAG_DATE}, {
-  GST_MATROSKA_TAG_ID_ISRC, GST_TAG_ISRC}, {
-  GST_MATROSKA_TAG_ID_COPYRIGHT, GST_TAG_COPYRIGHT}, {
-  GST_MATROSKA_TAG_ID_BPM, GST_TAG_BEATS_PER_MINUTE}, {
-  GST_MATROSKA_TAG_ID_TERMS_OF_USE, GST_TAG_LICENSE}, {
-  GST_MATROSKA_TAG_ID_COMPOSER, GST_TAG_COMPOSER}, {
-  GST_MATROSKA_TAG_ID_LEAD_PERFORMER, GST_TAG_PERFORMER}, {
-  GST_MATROSKA_TAG_ID_GENRE, GST_TAG_GENRE}
+      GST_MATROSKA_TAG_ID_TITLE, GST_TAG_TITLE}, {
+      GST_MATROSKA_TAG_ID_ARTIST, GST_TAG_ARTIST}, {
+      GST_MATROSKA_TAG_ID_ALBUM, GST_TAG_ALBUM}, {
+      GST_MATROSKA_TAG_ID_COMMENTS, GST_TAG_COMMENT}, {
+      GST_MATROSKA_TAG_ID_BITSPS, GST_TAG_BITRATE}, {
+      GST_MATROSKA_TAG_ID_BPS, GST_TAG_BITRATE}, {
+      GST_MATROSKA_TAG_ID_ENCODER, GST_TAG_ENCODER}, {
+      GST_MATROSKA_TAG_ID_DATE, GST_TAG_DATE}, {
+      GST_MATROSKA_TAG_ID_ISRC, GST_TAG_ISRC}, {
+      GST_MATROSKA_TAG_ID_COPYRIGHT, GST_TAG_COPYRIGHT}, {
+      GST_MATROSKA_TAG_ID_BPM, GST_TAG_BEATS_PER_MINUTE}, {
+      GST_MATROSKA_TAG_ID_TERMS_OF_USE, GST_TAG_LICENSE}, {
+      GST_MATROSKA_TAG_ID_COMPOSER, GST_TAG_COMPOSER}, {
+      GST_MATROSKA_TAG_ID_LEAD_PERFORMER, GST_TAG_PERFORMER}, {
+      GST_MATROSKA_TAG_ID_GENRE, GST_TAG_GENRE}
 };
 
 /* Every stagefright implementation on android up to and including 6.0.1 is using

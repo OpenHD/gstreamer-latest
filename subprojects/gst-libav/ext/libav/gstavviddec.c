@@ -1348,7 +1348,7 @@ gst_ffmpegviddec_negotiate (GstFFMpegVidDec * ffmpegdec,
   GstStructure *in_s;
   GstVideoInterlaceMode interlace_mode;
   gint caps_height;
-  gboolean one_field = ! !(flags & GST_VIDEO_BUFFER_FLAG_ONEFIELD);
+  gboolean one_field = !!(flags & GST_VIDEO_BUFFER_FLAG_ONEFIELD);
 
   if (!update_video_context (ffmpegdec, context, picture, one_field))
     return TRUE;
@@ -1835,10 +1835,12 @@ gst_ffmpegviddec_video_frame (GstFFMpegVidDec * ffmpegdec,
       out_frame->pts, out_frame->duration);
   GST_DEBUG_OBJECT (ffmpegdec, "picture: pts %" G_GUINT64_FORMAT,
       (guint64) ffmpegdec->picture->pts);
+#if LIBAVUTIL_VERSION_MAJOR < 58
   GST_DEBUG_OBJECT (ffmpegdec, "picture: num %d",
       ffmpegdec->picture->coded_picture_number);
   GST_DEBUG_OBJECT (ffmpegdec, "picture: display %d",
       ffmpegdec->picture->display_picture_number);
+#endif
   GST_DEBUG_OBJECT (ffmpegdec, "picture: opaque %p",
       ffmpegdec->picture->opaque);
   GST_DEBUG_OBJECT (ffmpegdec, "picture: reordered opaque %" G_GUINT64_FORMAT,
@@ -1846,7 +1848,7 @@ gst_ffmpegviddec_video_frame (GstFFMpegVidDec * ffmpegdec,
   GST_DEBUG_OBJECT (ffmpegdec, "repeat_pict:%d",
       ffmpegdec->picture->repeat_pict);
   GST_DEBUG_OBJECT (ffmpegdec, "corrupted frame: %d",
-      ! !(ffmpegdec->picture->flags & AV_FRAME_FLAG_CORRUPT));
+      !!(ffmpegdec->picture->flags & AV_FRAME_FLAG_CORRUPT));
 
   if (!gst_ffmpegviddec_negotiate (ffmpegdec, ffmpegdec->context,
           ffmpegdec->picture, GST_BUFFER_FLAGS (out_frame->input_buffer)))
@@ -2017,7 +2019,11 @@ gst_ffmpegviddec_frame (GstFFMpegVidDec * ffmpegdec, GstVideoCodecFrame * frame,
     goto no_codec;
 
   *ret = GST_FLOW_OK;
+#if LIBAVCODEC_VERSION_MAJOR >= 60
+  ffmpegdec->context->frame_num++;
+#else
   ffmpegdec->context->frame_number++;
+#endif
 
   got_frame = gst_ffmpegviddec_video_frame (ffmpegdec, frame, ret);
 
@@ -2042,13 +2048,20 @@ gst_ffmpegviddec_drain (GstVideoDecoder * decoder)
   if (!ffmpegdec->opened)
     return GST_FLOW_OK;
 
-  if (avcodec_send_packet (ffmpegdec->context, NULL))
+  GST_VIDEO_DECODER_STREAM_UNLOCK (ffmpegdec);
+  if (avcodec_send_packet (ffmpegdec->context, NULL)) {
+    GST_VIDEO_DECODER_STREAM_LOCK (ffmpegdec);
     goto send_packet_failed;
+  }
+  GST_VIDEO_DECODER_STREAM_LOCK (ffmpegdec);
 
   do {
     got_frame = gst_ffmpegviddec_frame (ffmpegdec, NULL, &ret);
   } while (got_frame && ret == GST_FLOW_OK);
+
+  GST_VIDEO_DECODER_STREAM_UNLOCK (ffmpegdec);
   avcodec_flush_buffers (ffmpegdec->context);
+  GST_VIDEO_DECODER_STREAM_LOCK (ffmpegdec);
 
   /* FFMpeg will return AVERROR_EOF if it's internal was fully drained
    * then we are translating it to GST_FLOW_EOS. However, because this behavior
@@ -2119,6 +2132,9 @@ gst_ffmpegviddec_handle_frame (GstVideoDecoder * decoder,
   /* now decode the frame */
   gst_avpacket_init (&packet, data, size);
 
+  if (!packet.size)
+    goto done;
+
   if (ffmpegdec->palette) {
     guint8 *pal;
 
@@ -2127,9 +2143,6 @@ gst_ffmpegviddec_handle_frame (GstVideoDecoder * decoder,
     gst_buffer_extract (ffmpegdec->palette, 0, pal, AVPALETTE_SIZE);
     GST_DEBUG_OBJECT (ffmpegdec, "copy pal %p %p", &packet, pal);
   }
-
-  if (!packet.size)
-    goto done;
 
   /* save reference to the timing info */
   ffmpegdec->context->reordered_opaque = (gint64) frame->system_frame_number;
@@ -2146,8 +2159,10 @@ gst_ffmpegviddec_handle_frame (GstVideoDecoder * decoder,
   GST_VIDEO_DECODER_STREAM_UNLOCK (ffmpegdec);
   if (avcodec_send_packet (ffmpegdec->context, &packet) < 0) {
     GST_VIDEO_DECODER_STREAM_LOCK (ffmpegdec);
+    av_packet_free_side_data (&packet);
     goto send_packet_failed;
   }
+  av_packet_free_side_data (&packet);
   GST_VIDEO_DECODER_STREAM_LOCK (ffmpegdec);
 
   do {
@@ -2259,7 +2274,9 @@ gst_ffmpegviddec_flush (GstVideoDecoder * decoder)
 
   if (ffmpegdec->opened) {
     GST_LOG_OBJECT (decoder, "flushing buffers");
+    GST_VIDEO_DECODER_STREAM_UNLOCK (ffmpegdec);
     avcodec_flush_buffers (ffmpegdec->context);
+    GST_VIDEO_DECODER_STREAM_LOCK (ffmpegdec);
   }
 
   return TRUE;

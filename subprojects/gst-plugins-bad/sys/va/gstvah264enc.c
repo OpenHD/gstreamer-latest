@@ -66,6 +66,7 @@
 #include "gstvaencoder.h"
 #include "gstvaprofile.h"
 #include "vacompat.h"
+#include "gstvapluginutils.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_va_h264enc_debug);
 #define GST_CAT_DEFAULT gst_va_h264enc_debug
@@ -309,26 +310,26 @@ struct _GstVaH264LevelLimits
 /* *INDENT-OFF* */
 static const GstVaH264LevelLimits _va_h264_level_limits[] = {
   /* level   idc   MaxMBPS   MaxFS   MaxDpbMbs  MaxBR   MaxCPB  MinCr */
-  {  "1",    10,   1485,     99,     396,       64,     175,    2 },
-  {  "1b",   11,   1485,     99,     396,       128,    350,    2 },
-  {  "1.1",  11,   3000,     396,    900,       192,    500,    2 },
-  {  "1.2",  12,   6000,     396,    2376,      384,    1000,   2 },
-  {  "1.3",  13,   11880,    396,    2376,      768,    2000,   2 },
-  {  "2",    20,   11880,    396,    2376,      2000,   2000,   2 },
-  {  "2.1",  21,   19800,    792,    4752,      4000,   4000,   2 },
-  {  "2.2",  22,   20250,    1620,   8100,      4000,   4000,   2 },
-  {  "3",    30,   40500,    1620,   8100,      10000,  10000,  2 },
-  {  "3.1",  31,   108000,   3600,   18000,     14000,  14000,  4 },
-  {  "3.2",  32,   216000,   5120,   20480,     20000,  20000,  4 },
-  {  "4",    40,   245760,   8192,   32768,     20000,  25000,  4 },
-  {  "4.1",  41,   245760,   8192,   32768,     50000,  62500,  2 },
-  {  "4.2",  42,   522240,   8704,   34816,     50000,  62500,  2 },
-  {  "5",    50,   589824,   22080,  110400,    135000, 135000, 2 },
-  {  "5.1",  51,   983040,   36864,  184320,    240000, 240000, 2 },
-  {  "5.2",  52,   2073600,  36864,  184320,    240000, 240000, 2 },
-  {  "6",    60,   4177920,  139264, 696320,    240000, 240000, 2 },
-  {  "6.1",  61,   8355840,  139264, 696320,    480000, 480000, 2 },
-  {  "6.2",  62,  16711680,  139264, 696320,    800000, 800000, 2 },
+  {  "1",    GST_H264_LEVEL_L1,   1485,     99,     396,       64,     175,    2 },
+  {  "1b",   GST_H264_LEVEL_L1B,   1485,     99,     396,       128,    350,    2 },
+  {  "1.1",  GST_H264_LEVEL_L1_1,   3000,     396,    900,       192,    500,    2 },
+  {  "1.2",  GST_H264_LEVEL_L1_2,   6000,     396,    2376,      384,    1000,   2 },
+  {  "1.3",  GST_H264_LEVEL_L1_3,   11880,    396,    2376,      768,    2000,   2 },
+  {  "2",    GST_H264_LEVEL_L2,   11880,    396,    2376,      2000,   2000,   2 },
+  {  "2.1",  GST_H264_LEVEL_L2_1,   19800,    792,    4752,      4000,   4000,   2 },
+  {  "2.2",  GST_H264_LEVEL_L2_2,   20250,    1620,   8100,      4000,   4000,   2 },
+  {  "3",    GST_H264_LEVEL_L3,   40500,    1620,   8100,      10000,  10000,  2 },
+  {  "3.1",  GST_H264_LEVEL_L3_1,   108000,   3600,   18000,     14000,  14000,  4 },
+  {  "3.2",  GST_H264_LEVEL_L3_2,   216000,   5120,   20480,     20000,  20000,  4 },
+  {  "4",    GST_H264_LEVEL_L4,   245760,   8192,   32768,     20000,  25000,  4 },
+  {  "4.1",  GST_H264_LEVEL_L4_1,   245760,   8192,   32768,     50000,  62500,  2 },
+  {  "4.2",  GST_H264_LEVEL_L4_2,   522240,   8704,   34816,     50000,  62500,  2 },
+  {  "5",    GST_H264_LEVEL_L5,   589824,   22080,  110400,    135000, 135000, 2 },
+  {  "5.1",  GST_H264_LEVEL_L5_1,   983040,   36864,  184320,    240000, 240000, 2 },
+  {  "5.2",  GST_H264_LEVEL_L5_2,   2073600,  36864,  184320,    240000, 240000, 2 },
+  {  "6",    GST_H264_LEVEL_L6,   4177920,  139264, 696320,    240000, 240000, 2 },
+  {  "6.1",  GST_H264_LEVEL_L6_1,   8355840,  139264, 696320,    480000, 480000, 2 },
+  {  "6.2",  GST_H264_LEVEL_L6_2,  16711680,  139264, 696320,    800000, 800000, 2 },
 };
 /* *INDENT-ON* */
 
@@ -375,7 +376,7 @@ gst_va_enc_frame_new (void)
 {
   GstVaH264EncFrame *frame;
 
-  frame = g_slice_new (GstVaH264EncFrame);
+  frame = g_new (GstVaH264EncFrame, 1);
   frame->frame_num = 0;
   frame->unused_for_reference_pic_num = -1;
   frame->picture = NULL;
@@ -390,7 +391,7 @@ gst_va_enc_frame_free (gpointer pframe)
 {
   GstVaH264EncFrame *frame = pframe;
   g_clear_pointer (&frame->picture, gst_va_encode_picture_free);
-  g_slice_free (GstVaH264EncFrame, frame);
+  g_free (frame);
 }
 
 static inline GstVaH264EncFrame *
@@ -2536,7 +2537,7 @@ static void
 _insert_ref_pic_list_modification (GstH264SliceHdr * slice_hdr,
     GstVaH264EncFrame * list[16], guint list_num, gboolean is_asc)
 {
-  GstVaH264EncFrame *list_by_pic_num[16] = { };
+  GstVaH264EncFrame *list_by_pic_num[16] = { NULL, };
   guint modification_num, i;
   GstH264RefPicListModification *ref_pic_list_modification = NULL;
   gint pic_num_diff, pic_num_lx_pred;
@@ -2716,7 +2717,7 @@ static gboolean
 _add_aud (GstVaH264Enc * self, GstVaH264EncFrame * frame)
 {
   GstVaBaseEnc *base = GST_VA_BASE_ENC (self);
-  guint8 aud_data[8] = { };
+  guint8 aud_data[8] = { 0, };
   guint size;
   guint8 primary_pic_type = 0;
 
@@ -3412,9 +3413,30 @@ gst_va_h264_enc_get_property (GObject * object, guint prop_id,
     case PROP_CC:
       g_value_set_boolean (value, self->prop.cc);
       break;
-    case PROP_MBBRC:
-      g_value_set_enum (value, self->prop.mbbrc);
+    case PROP_MBBRC:{
+      GstVaFeature mbbrc = GST_VA_FEATURE_AUTO;
+      /* Macroblock-level rate control.
+       * 0: use default,
+       * 1: always enable,
+       * 2: always disable,
+       * other: reserved. */
+      switch (self->prop.mbbrc) {
+        case 2:
+          mbbrc = GST_VA_FEATURE_DISABLED;
+          break;
+        case 1:
+          mbbrc = GST_VA_FEATURE_ENABLED;
+          break;
+        case 0:
+          mbbrc = GST_VA_FEATURE_AUTO;
+          break;
+        default:
+          g_assert_not_reached ();
+      }
+
+      g_value_set_enum (value, mbbrc);
       break;
+    }
     case PROP_BITRATE:
       g_value_set_uint (value, self->prop.bitrate);
       break;
@@ -3510,8 +3532,7 @@ gst_va_h264_enc_class_init (gpointer g_klass, gpointer class_data)
       GST_DEBUG_FUNCPTR (gst_va_h264_enc_prepare_output);
 
   {
-    display =
-        gst_va_display_drm_new_from_path (va_enc_class->render_device_path);
+    display = gst_va_display_platform_new (va_enc_class->render_device_path);
     encoder = gst_va_encoder_new (display, va_enc_class->codec,
         va_enc_class->entrypoint);
     if (gst_va_encoder_get_rate_control_enum (encoder,
@@ -3819,30 +3840,14 @@ gst_va_h264_enc_register (GstPlugin * plugin, GstVaDevice * device,
 
   type_info.class_data = cdata;
 
-  /* The first encoder to be registered should use a constant name,
-   * like vah264enc, for any additional encoders, we create unique
-   * names, using inserting the render device name. */
-  if (device->index == 0) {
-    if (entrypoint == VAEntrypointEncSlice) {
-      type_name = g_strdup ("GstVaH264Enc");
-      feature_name = g_strdup ("vah264enc");
-    } else {
-      type_name = g_strdup ("GstVaH264LPEnc");
-      feature_name = g_strdup ("vah264lpenc");
-    }
+  if (entrypoint == VAEntrypointEncSlice) {
+    gst_va_create_feature_name (device, "GstVaH264Enc", "GstVa%sH264Enc",
+        &type_name, "vah264enc", "va%sh264enc", &feature_name,
+        &cdata->description, &rank);
   } else {
-    gchar *basename = g_path_get_basename (device->render_device_path);
-    if (entrypoint == VAEntrypointEncSlice) {
-      type_name = g_strdup_printf ("GstVa%sH264Enc", basename);
-      feature_name = g_strdup_printf ("va%sh264enc", basename);
-    } else {
-      type_name = g_strdup_printf ("GstVa%sH264LPEnc", basename);
-      feature_name = g_strdup_printf ("va%sh264lpenc", basename);
-    }
-    cdata->description = basename;
-    /* lower rank for non-first device */
-    if (rank > 0)
-      rank--;
+    gst_va_create_feature_name (device, "GstVaH264LPEnc", "GstVa%sH264LPEnc",
+        &type_name, "vah264lpenc", "va%sh264lpenc", &feature_name,
+        &cdata->description, &rank);
   }
 
   g_once (&debug_once, _register_debug_category, NULL);

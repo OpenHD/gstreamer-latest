@@ -1410,7 +1410,7 @@ gst_adaptive_demux2_stream_submit_request_default (GstAdaptiveDemux2Stream *
   GstAdaptiveDemux *demux = stream->demux;
 
   if (!downloadhelper_submit_request (demux->download_helper,
-          demux->manifest_uri, DOWNLOAD_FLAG_NONE, download_req, NULL))
+          NULL, DOWNLOAD_FLAG_NONE, download_req, NULL))
     return GST_FLOW_ERROR;
 
   return GST_FLOW_OK;
@@ -2229,6 +2229,20 @@ gst_adaptive_demux2_stream_is_selected_locked (GstAdaptiveDemux2Stream * stream)
   return FALSE;
 }
 
+gboolean
+gst_adaptive_demux2_stream_is_default_locked (GstAdaptiveDemux2Stream * stream)
+{
+  GList *tmp;
+
+  for (tmp = stream->tracks; tmp; tmp = tmp->next) {
+    GstAdaptiveDemuxTrack *track = tmp->data;
+    if (track->flags & GST_STREAM_FLAG_SELECT)
+      return TRUE;
+  }
+
+  return FALSE;
+}
+
 /**
  * gst_adaptive_demux2_stream_is_selected:
  * @stream: A #GstAdaptiveDemux2Stream
@@ -2696,7 +2710,7 @@ gst_adaptive_demux2_stream_update_current_bitrate (GstAdaptiveDemux2Stream *
    * fraction of the measured download rate */
   target_download_rate =
       CLAMP (stream->current_download_rate, 0,
-      G_MAXUINT) * demux->bandwidth_target_ratio;
+      G_MAXUINT) * (gdouble) demux->bandwidth_target_ratio;
 
   GST_DEBUG_OBJECT (stream, "Bitrate after target ratio limit (%0.2f): %u",
       demux->bandwidth_target_ratio, target_download_rate);

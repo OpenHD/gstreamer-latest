@@ -358,6 +358,10 @@ static gchar *
 apply_directives_to_uri (GstHLSDemuxPlaylistLoader * pl,
     const gchar * playlist_uri, struct PlaylistDownloadParams *dl_params)
 {
+  /* Short-circuit URI parsing if nothing will change */
+  if (dl_params->flags == 0)
+    return g_strdup (playlist_uri);
+
   GstUri *uri = gst_uri_from_string (playlist_uri);
 
   if (dl_params->flags & PLAYLIST_DOWNLOAD_FLAG_SKIP_V1) {
@@ -675,8 +679,6 @@ start_playlist_download (GstHLSDemuxPlaylistLoader * pl,
     GstHLSDemuxPlaylistLoaderPrivate * priv)
 {
   gboolean allow_skip = !priv->delta_merge_failed;
-
-  const gchar *base_uri = priv->base_uri;
   const gchar *orig_uri = priv->target_playlist_uri;
 
   /* Can't download yet */
@@ -765,7 +767,7 @@ start_playlist_download (GstHLSDemuxPlaylistLoader * pl,
   priv->state = PLAYLIST_LOADER_STATE_LOADING;
 
   if (!downloadhelper_submit_request (priv->download_helper,
-          base_uri, DOWNLOAD_FLAG_COMPRESS | DOWNLOAD_FLAG_FORCE_REFRESH,
+          NULL, DOWNLOAD_FLAG_COMPRESS | DOWNLOAD_FLAG_FORCE_REFRESH,
           priv->download_request, NULL)) {
     /* Failed to submit the download - could be invalid URI, but
      * could just mean the download helper was stopped */

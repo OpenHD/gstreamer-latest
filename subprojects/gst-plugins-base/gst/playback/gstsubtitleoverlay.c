@@ -750,8 +750,9 @@ _get_silent_property (GstElement * element, gboolean * invert)
     const gchar *name;
     gboolean invert;
   } properties[] = { {
-  "silent", FALSE}, {
-  "enable", TRUE}};
+      "silent", FALSE}, {
+      "enable", TRUE}
+  };
   guint i;
 
   for (i = 0; i < G_N_ELEMENTS (properties); i++) {
@@ -1735,7 +1736,6 @@ gst_subtitle_overlay_video_sink_setcaps (GstSubtitleOverlay * self,
   if (!gst_video_info_from_caps (&info, caps)) {
     GST_ERROR_OBJECT (self, "Failed to parse caps");
     ret = FALSE;
-    GST_SUBTITLE_OVERLAY_UNLOCK (self);
     goto out;
   }
 

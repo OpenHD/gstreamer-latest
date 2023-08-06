@@ -699,6 +699,7 @@ struct resolve_candidate_data
   guint nice_stream_id;
   char *prefix;
   char *postfix;
+  GstPromise *promise;
 };
 
 static void
@@ -706,6 +707,8 @@ free_resolve_candidate_data (struct resolve_candidate_data *rc)
 {
   g_free (rc->prefix);
   g_free (rc->postfix);
+  if (rc->promise)
+    gst_promise_unref (rc->promise);
   g_free (rc);
 }
 
@@ -743,13 +746,21 @@ on_candidate_resolved (GstWebRTCICE * ice, GAsyncResult * res,
   GstWebRTCNice *nice = GST_WEBRTC_NICE (ice);
 
   if (!(addresses = resolve_host_finish (nice, res, &error))) {
-    GST_WARNING_OBJECT (ice, "Could not resolve candidate address: %s",
-        error->message);
+    if (rc->promise) {
+      GstStructure *s = gst_structure_new ("application/x-gst-promise", "error",
+          G_TYPE_ERROR, error, NULL);
+      gst_promise_reply (rc->promise, s);
+    } else {
+      GST_WARNING_OBJECT (ice, "Could not resolve candidate address: %s",
+          error->message);
+    }
     g_clear_error (&error);
     return;
   }
 
   new_addr = g_inet_address_to_string (addresses->data);
+  g_resolver_free_addresses (addresses);
+  addresses = NULL;
 
   new_candv[0] = rc->prefix;
   new_candv[1] = new_addr;
@@ -764,7 +775,18 @@ on_candidate_resolved (GstWebRTCICE * ice, GAsyncResult * res,
       rc->nice_stream_id, new_candidate);
   g_free (new_candidate);
   if (!cand) {
-    GST_WARNING_OBJECT (ice, "Could not parse candidate \'%s\'", new_candidate);
+    if (rc->promise) {
+      GError *error =
+          g_error_new (GST_WEBRTC_ERROR, GST_WEBRTC_ERROR_INTERNAL_FAILURE,
+          "Could not parse candidate \'%s\'", new_candidate);
+      GstStructure *s = gst_structure_new ("application/x-gst-promise", "error",
+          G_TYPE_ERROR, error, NULL);
+      gst_promise_reply (rc->promise, s);
+      g_clear_error (&error);
+    } else {
+      GST_WARNING_OBJECT (ice, "Could not parse candidate \'%s\'",
+          new_candidate);
+    }
     return;
   }
 
@@ -777,7 +799,7 @@ on_candidate_resolved (GstWebRTCICE * ice, GAsyncResult * res,
 /* candidate must start with "a=candidate:" or be NULL*/
 static void
 gst_webrtc_nice_add_candidate (GstWebRTCICE * ice, GstWebRTCICEStream * stream,
-    const gchar * candidate)
+    const gchar * candidate, GstPromise * promise)
 {
   struct NiceStreamItem *item;
   NiceCandidate *cand;
@@ -801,14 +823,37 @@ gst_webrtc_nice_add_candidate (GstWebRTCICE * ice, GstWebRTCICEStream * stream,
     struct resolve_candidate_data *rc;
 
     if (!get_candidate_address (candidate, &prefix, &address, &postfix)) {
-      GST_WARNING_OBJECT (nice, "Failed to retrieve address from candidate %s",
-          candidate);
+      if (promise) {
+        GError *error =
+            g_error_new (GST_WEBRTC_ERROR, GST_WEBRTC_ERROR_INTERNAL_FAILURE,
+            "Failed to retrieve address from candidate %s",
+            candidate);
+        GstStructure *s = gst_structure_new ("application/x-gst-promise",
+            "error", G_TYPE_ERROR, error, NULL);
+        gst_promise_reply (promise, s);
+        g_clear_error (&error);
+      } else {
+        GST_WARNING_OBJECT (nice,
+            "Failed to retrieve address from candidate %s", candidate);
+      }
       goto done;
     }
 
     if (!g_str_has_suffix (address, ".local")) {
-      GST_WARNING_OBJECT (nice, "candidate address \'%s\' does not end "
-          "with \'.local\'", address);
+      if (promise) {
+        GError *error =
+            g_error_new (GST_WEBRTC_ERROR, GST_WEBRTC_ERROR_INTERNAL_FAILURE,
+            "candidate address \'%s\' does not end " "with \'.local\'",
+            address);
+        GstStructure *s = gst_structure_new ("application/x-gst-promise",
+            "error", G_TYPE_ERROR, error, NULL);
+        gst_promise_reply (promise, s);
+        g_clear_error (&error);
+      } else {
+        GST_WARNING_OBJECT (nice,
+            "candidate address \'%s\' does not end "
+            "with \'.local\'", address);
+      }
       goto done;
     }
 
@@ -816,6 +861,7 @@ gst_webrtc_nice_add_candidate (GstWebRTCICE * ice, GstWebRTCICEStream * stream,
     rc->nice_stream_id = item->nice_stream_id;
     rc->prefix = prefix;
     rc->postfix = postfix;
+    rc->promise = promise ? gst_promise_ref (promise) : NULL;
     resolve_host_async (nice, address,
         (GAsyncReadyCallback) on_candidate_resolved, rc,
         (GDestroyNotify) free_resolve_candidate_data);
@@ -1317,6 +1363,8 @@ on_http_proxy_resolved (GstWebRTCICE * ice, GAsyncResult * res,
 
   /* XXX: only the first IP is used */
   ip = g_inet_address_to_string (addresses->data);
+  g_resolver_free_addresses (addresses);
+  addresses = NULL;
 
   if (!ip) {
     GST_ERROR_OBJECT (ice, "failed to resolve host for proxy");
@@ -1579,6 +1627,11 @@ gst_webrtc_nice_constructed (GObject * object)
 
   options |= NICE_AGENT_OPTION_ICE_TRICKLE;
   options |= NICE_AGENT_OPTION_REGULAR_NOMINATION;
+
+/*  https://gitlab.freedesktop.org/libnice/libnice/-/merge_requests/257 */
+#if HAVE_LIBNICE_CONSENT_FIX
+  options |= NICE_AGENT_OPTION_CONSENT_FRESHNESS;
+#endif
 
   ice->priv->nice_agent = nice_agent_new_full (ice->priv->main_context,
       NICE_COMPATIBILITY_RFC5245, options);

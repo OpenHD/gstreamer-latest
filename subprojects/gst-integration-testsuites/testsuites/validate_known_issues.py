@@ -101,7 +101,8 @@ KNOWN_ISSUES = {
             },
         ]
     },
-    "https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/930": {
+    # https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/930
+    "WontFix-legacy-HLS-1": {
         "tests": [
             "validate.hls.playback.reverse_playback.*",
         ],
@@ -125,7 +126,8 @@ KNOWN_ISSUES = {
             },
         ],
     },
-    "https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/609": {
+    # https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/609
+    "WontFix-legacy-HLS-2": {
         "tests": [
             "validate.hls.playback.*seek.*",
         ],
@@ -139,7 +141,8 @@ KNOWN_ISSUES = {
             },
         ],
     },
-    "https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/937": {
+    # https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/937
+    "WontFix-legacy-HLS-3": {
         "tests": [
             "validate.hls.playback.fast_forward.*",
         ],
@@ -225,19 +228,6 @@ KNOWN_ISSUES = {
                 "detected-on": "reverse_playback",
             },
         ],
-    },
-    "https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/1020": {
-        "tests": [
-            "validate.*mxf.*",
-        ],
-        "issues": [
-            {
-                "issue-id": "threading::pull-range-from-wrong-thread",
-                "summary": "gst_pad_pull_range called from wrong thread",
-                "level": "critical",
-                'can-happen-several-times': True,
-            },
-        ]
     },
     "Our asf file is basically broken": {
         "tests": [

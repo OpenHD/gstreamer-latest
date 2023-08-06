@@ -269,6 +269,8 @@ struct _GstMpeg2DecoderPrivate
   gboolean is_live;
 
   gboolean input_state_changed;
+
+  GstFlowReturn last_flow;
 };
 
 #define UPDATE_FLOW_RETURN(ret,new_ret) G_STMT_START { \
@@ -329,6 +331,7 @@ static void
 gst_mpeg2_decoder_init (GstMpeg2Decoder * self)
 {
   gst_video_decoder_set_packetized (GST_VIDEO_DECODER (self), TRUE);
+  gst_video_decoder_set_needs_format (GST_VIDEO_DECODER (self), TRUE);
 
   self->priv = gst_mpeg2_decoder_get_instance_private (self);
 
@@ -351,6 +354,7 @@ gst_mpeg2_decoder_start (GstVideoDecoder * decoder)
   priv->dpb = gst_mpeg2_dpb_new ();
   priv->profile = -1;
   priv->progressive = TRUE;
+  priv->last_flow = GST_FLOW_OK;
 
   priv->output_queue =
       gst_queue_array_new_for_struct (sizeof (GstMpeg2DecoderOutputFrame), 1);
@@ -801,8 +805,8 @@ gst_mpeg2_decoder_handle_picture (GstMpeg2Decoder * decoder,
         &priv->seq_display_ext : NULL,
         _seq_scalable_ext_is_valid (&priv->seq_scalable_ext) ?
         &priv->seq_scalable_ext : NULL,
-        /* previous/next 2 pictures */
-        2 + priv->preferred_output_delay);
+        /* previous/next 2 pictures + current picture */
+        3 + priv->preferred_output_delay);
 
     if (ret != GST_FLOW_OK) {
       GST_WARNING_OBJECT (decoder, "new sequence error");
@@ -1169,7 +1173,7 @@ gst_mpeg2_decoder_do_output_picture (GstMpeg2Decoder * decoder,
   output_frame.self = decoder;
   gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
   gst_mpeg2_decoder_drain_output_queue (decoder, priv->preferred_output_delay,
-      ret);
+      &priv->last_flow);
 }
 
 static GstFlowReturn
@@ -1243,6 +1247,7 @@ gst_mpeg2_decoder_handle_frame (GstVideoDecoder * decoder,
       GST_TIME_ARGS (GST_BUFFER_DTS (in_buf)), frame->system_frame_number);
 
   priv->state &= ~GST_MPEG2_DECODER_STATE_GOT_SLICE;
+  priv->last_flow = GST_FLOW_OK;
 
   priv->current_frame = frame;
   gst_buffer_map (in_buf, &map_info, GST_MAP_READ);
@@ -1293,6 +1298,18 @@ gst_mpeg2_decoder_handle_frame (GstVideoDecoder * decoder,
   gst_clear_mpeg2_picture (&priv->first_field);
   gst_video_codec_frame_unref (priv->current_frame);
   priv->current_frame = NULL;
+
+  if (priv->last_flow != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Last flow %s", gst_flow_get_name (priv->last_flow));
+    return priv->last_flow;
+  }
+
+  if (ret == GST_FLOW_ERROR) {
+    GST_VIDEO_DECODER_ERROR (self, 1, STREAM, DECODE,
+        ("Failed to decode data"), (NULL), ret);
+  }
+
   return ret;
 
 failed:
@@ -1303,7 +1320,7 @@ failed:
           ret);
     }
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
     gst_clear_mpeg2_picture (&priv->current_picture);
     gst_clear_mpeg2_picture (&priv->first_field);
     priv->current_frame = NULL;

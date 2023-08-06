@@ -74,9 +74,14 @@ if built_subprojects != ''
             endforeach
 
             foreach plugin_doc: sub.get_variable('plugins_doc', [])
+              warning(project_name+ ': variable plugins_doc is deprecated, use gst_plugins_doc instead')
               plugins_doc += plugin_doc.full_path() + pathsep
               hotdoc_subprojects += [plugin_doc]
               deps += [plugin_doc]
+            endforeach
+
+            foreach plugin_doc: sub.get_variable('gst_plugins_doc', [])
+              plugins_doc += plugin_doc + pathsep
             endforeach
         else
             message('@0@ did not build hotdoc documentation, can\'t build API doc'.format(project_name))
@@ -96,7 +101,7 @@ sitemap = configure_file(command: [sitemap_gen, '@INPUT@', '@OUTPUT@',
   input: 'sitemap.txt',
   output: 'sitemap.txt')
 
-html_theme = 'https://github.com/hotdoc/hotdoc_lumen_theme/releases/download/0.13.2/hotdoc_lumen_theme-0.13.2.tar.xz?sha256=5721189b7e985f27381ee20137f4a9003049a70a75ab1221a69fd04d27e752bc'
+html_theme = 'https://github.com/hotdoc/hotdoc_lumen_theme/releases/download/0.15/hotdoc_lumen_theme-0.15.tar.xz?sha256=1ea7fd00d8dfd607d175c59e2d89918a55114c867f697a94c703f314b0d9b4b6'
 
 gstreamer_doc = hotdoc.generate_doc('GStreamer',
     project_version: apiversion,

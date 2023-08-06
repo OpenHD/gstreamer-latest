@@ -79,6 +79,7 @@ enum
 #define DEFAULT_REDIRECT         TRUE
 #define DEFAULT_RTCP_MODE        GST_SDP_DEMUX_RTCP_MODE_SENDRECV
 #define DEFAULT_MEDIA            NULL
+#define DEFAULT_TIMEOUT_INACTIVE_RTP_SOURCES TRUE
 
 enum
 {
@@ -89,6 +90,7 @@ enum
   PROP_REDIRECT,
   PROP_RTCP_MODE,
   PROP_MEDIA,
+  PROP_TIMEOUT_INACTIVE_RTP_SOURCES,
 };
 
 static void gst_sdp_demux_finalize (GObject * object);
@@ -202,6 +204,23 @@ gst_sdp_demux_class_init (GstSDPDemuxClass * klass)
           "Media to use, e.g. audio or video (NULL = all)", DEFAULT_MEDIA,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstSDPDemux:timeout-inactive-rtp-sources:
+   *
+   * Whether inactive RTP sources in the underlying RTP session
+   * should be timed out.
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class,
+      PROP_TIMEOUT_INACTIVE_RTP_SOURCES,
+      g_param_spec_boolean ("timeout-inactive-rtp-sources",
+          "Time out inactive sources",
+          "Whether RTP sources that don't receive RTP or RTCP packets for longer "
+          "than 5x RTCP interval should be removed",
+          DEFAULT_TIMEOUT_INACTIVE_RTP_SOURCES,
+          G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &rtptemplate);
 
@@ -284,6 +303,9 @@ gst_sdp_demux_set_property (GObject * object, guint prop_id,
       demux->media = g_intern_string (g_value_get_string (value));
       GST_OBJECT_UNLOCK (demux);
       break;
+    case PROP_TIMEOUT_INACTIVE_RTP_SOURCES:
+      demux->timeout_inactive_rtp_sources = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -318,6 +340,9 @@ gst_sdp_demux_get_property (GObject * object, guint prop_id, GValue * value,
       GST_OBJECT_LOCK (demux);
       g_value_set_string (value, demux->media);
       GST_OBJECT_UNLOCK (demux);
+      break;
+    case PROP_TIMEOUT_INACTIVE_RTP_SOURCES:
+      g_value_set_boolean (value, demux->timeout_inactive_rtp_sources);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -421,6 +446,9 @@ gst_sdp_demux_stream_free (GstSDPDemux * demux, GstSDPStream * stream)
     }
     stream->srcpad = NULL;
   }
+
+  g_free (stream->src_list);
+  g_free (stream->src_incl_list);
   g_free (stream);
 }
 
@@ -453,6 +481,149 @@ out:
   if (addr)
     g_object_unref (addr);
   return ret;
+}
+
+/* RTC 4570 Session Description Protocol (SDP) Source Filters
+ * syntax:
+ * a=source-filter: <filter-mode> <filter-spec>
+ *
+ * where
+ * <filter-mode>: "incl" or "excl"
+ *
+ * <filter-spec>:
+ * <nettype> <address-types> <dest-address> <src-list>
+ *
+ */
+static gboolean
+gst_sdp_demux_parse_source_filter (GstSDPDemux * self,
+    const gchar * source_filter, const gchar * dst_addr, GString * source_list,
+    GString * source_incl_list)
+{
+  const gchar *str;
+  guint remaining;
+  gchar *del;
+  gsize size;
+  guint min_size;
+  gboolean is_incl;
+  gchar *dst;
+
+  if (!source_filter || !dst_addr)
+    return FALSE;
+
+  str = source_filter;
+  remaining = strlen (str);
+  min_size = strlen ("incl IN IP4 * *");
+  if (remaining < min_size)
+    return FALSE;
+
+#define LSTRIP(s) G_STMT_START { \
+  while (g_ascii_isspace (*(s))) { \
+    (s)++; \
+    remaining--; \
+  } \
+  if (*(s) == '\0') \
+    return FALSE; \
+} G_STMT_END
+
+#define SKIP_N_LSTRIP(s, n) G_STMT_START { \
+  if (remaining < n) \
+    return FALSE; \
+  (s) += n; \
+  if (*(s) == '\0') \
+    return FALSE; \
+  remaining -= n; \
+  LSTRIP(s); \
+} G_STMT_END
+
+  LSTRIP (str);
+  if (remaining < min_size)
+    return FALSE;
+
+  if (g_str_has_prefix (str, "incl ")) {
+    is_incl = TRUE;
+  } else if (g_str_has_prefix (str, "excl ")) {
+    is_incl = FALSE;
+  } else {
+    GST_WARNING_OBJECT (self, "Unexpected filter type");
+    return FALSE;
+  }
+
+  SKIP_N_LSTRIP (str, 4);
+  /* XXX: <nettype>, internet only for now */
+  if (!g_str_has_prefix (str, "IN "))
+    return FALSE;
+
+  SKIP_N_LSTRIP (str, 3);
+  /* Should care the address type here? */
+  if (g_str_has_prefix (str, "* ")) {
+    /* dest and src are both FQDN */
+    SKIP_N_LSTRIP (str, 2);
+  } else if (g_str_has_prefix (str, "IP4 ")) {
+    SKIP_N_LSTRIP (str, 4);
+  } else if (g_str_has_prefix (str, "IP6 ")) {
+    SKIP_N_LSTRIP (str, 4);
+  } else {
+    return FALSE;
+  }
+
+  del = strchr (str, ' ');
+  if (!del) {
+    GST_WARNING_OBJECT (self, "Unexpected dest-address format");
+    return FALSE;
+  }
+
+  size = del - str;
+  dst = g_strndup (str, size);
+  if (g_strcmp0 (dst, dst_addr) != 0 && g_strcmp0 (dst, "*") != 0) {
+    g_free (dst);
+    return FALSE;
+  }
+  g_free (dst);
+
+  SKIP_N_LSTRIP (str, size);
+
+  do {
+    del = strchr (str, ' ');
+    if (del) {
+      size = del - str;
+      if (is_incl) {
+        g_string_append_c (source_list, '+');
+        g_string_append_len (source_list, str, size);
+
+        g_string_append_c (source_incl_list, '+');
+        g_string_append_len (source_incl_list, str, size);
+      } else {
+        g_string_append_c (source_list, '-');
+        g_string_append_len (source_list, str, size);
+      }
+
+      str += size;
+      while (g_ascii_isspace (*str)) {
+        str++;
+      }
+
+      /* this was the last source but with trailing space */
+      if (*str == '\0')
+        return TRUE;
+    } else {
+      if (is_incl) {
+        g_string_append_c (source_list, '+');
+        g_string_append (source_list, str);
+
+        g_string_append_c (source_incl_list, '+');
+        g_string_append (source_incl_list, str);
+      } else {
+        g_string_append_c (source_list, '-');
+        g_string_append (source_list, str);
+      }
+
+      return TRUE;
+    }
+  } while (TRUE);
+
+#undef LSTRIP
+#undef SKIP_N
+  return TRUE;
 }
 
 static GstSDPStream *
@@ -531,6 +702,48 @@ gst_sdp_demux_create_stream (GstSDPDemux * demux, GstSDPMessage * sdp, gint idx)
   stream->destination = conn->address;
   stream->ttl = conn->ttl;
   stream->multicast = is_multicast_address (stream->destination);
+  if (stream->multicast) {
+    GString *source_list = g_string_new (NULL);
+    GString *source_incl_list = g_string_new (NULL);
+    guint i;
+    gboolean source_filter_in_media = FALSE;
+
+    for (i = 0; i < media->attributes->len; i++) {
+      GstSDPAttribute *attr = &g_array_index (media->attributes,
+          GstSDPAttribute, i);
+
+      if (g_strcmp0 (attr->key, "source-filter") == 0) {
+        source_filter_in_media = TRUE;
+        gst_sdp_demux_parse_source_filter (demux, attr->value,
+            stream->destination, source_list, source_incl_list);
+      }
+    }
+
+    /* Try session level source filter if media level filter is unspecified */
+    if (source_list->len == 0 && !source_filter_in_media) {
+      for (i = 0; i < sdp->attributes->len; i++) {
+        GstSDPAttribute *attr = &g_array_index (sdp->attributes,
+            GstSDPAttribute, i);
+
+        if (g_strcmp0 (attr->key, "source-filter") == 0) {
+          gst_sdp_demux_parse_source_filter (demux, attr->value,
+              stream->destination, source_list, source_incl_list);
+        }
+      }
+    }
+
+    if (source_list->len > 0) {
+      stream->src_list = g_string_free (source_list, FALSE);
+      stream->src_incl_list = g_string_free (source_incl_list, FALSE);
+
+      GST_DEBUG_OBJECT (demux,
+          "Have source-filter: \"%s\", positive-only: \"%s\"",
+          stream->src_list, GST_STR_NULL (stream->src_incl_list));
+    } else {
+      g_string_free (source_list, TRUE);
+      g_string_free (source_incl_list, TRUE);
+    }
+  }
 
   stream->rtp_port = gst_sdp_media_get_port (media);
 
@@ -623,6 +836,9 @@ new_session_pad (GstElement * session, GstPad * pad, GstSDPDemux * demux)
   if (stream == NULL)
     goto unknown_stream;
 
+  if (stream->srcpad)
+    goto unexpected_pad;
+
   stream->ssrc = ssrc;
 
   /* no need for a timeout anymore now */
@@ -663,6 +879,13 @@ new_session_pad (GstElement * session, GstPad * pad, GstSDPDemux * demux)
   return;
 
   /* ERRORS */
+unexpected_pad:
+  {
+    GST_DEBUG_OBJECT (demux, "ignoring unexpected session pad");
+    GST_SDP_STREAM_UNLOCK (demux);
+    g_free (name);
+    return;
+  }
 unknown_stream:
   {
     GST_DEBUG_OBJECT (demux, "ignoring unknown stream");
@@ -823,6 +1046,9 @@ gst_sdp_demux_configure_manager (GstSDPDemux * demux, char *rtsp_sdp)
         demux);
     g_signal_connect (demux->session, "on-timeout", (GCallback) on_timeout,
         demux);
+
+    g_object_set (demux->session, "timeout-inactive-sources",
+        demux->timeout_inactive_rtp_sources, NULL);
   }
 
   g_object_set (demux->session, "latency", demux->latency, NULL);
@@ -866,7 +1092,13 @@ gst_sdp_demux_stream_configure_udp (GstSDPDemux * demux, GstSDPStream * stream)
     GST_DEBUG_OBJECT (demux, "receiving RTP from %s:%d", destination,
         stream->rtp_port);
 
-    uri = g_strdup_printf ("udp://%s:%d", destination, stream->rtp_port);
+    if (stream->src_list) {
+      uri = g_strdup_printf ("udp://%s:%d?multicast-source=%s",
+          destination, stream->rtp_port, stream->src_list);
+    } else {
+      uri = g_strdup_printf ("udp://%s:%d", destination, stream->rtp_port);
+    }
+
     stream->udpsrc[0] =
         gst_element_make_from_uri (GST_URI_SRC, uri, NULL, NULL);
     g_free (uri);
@@ -909,7 +1141,13 @@ gst_sdp_demux_stream_configure_udp (GstSDPDemux * demux, GstSDPStream * stream)
           || demux->rtcp_mode == GST_SDP_DEMUX_RTCP_MODE_RECVONLY)) {
     GST_DEBUG_OBJECT (demux, "receiving RTCP from %s:%d", destination,
         stream->rtcp_port);
-    uri = g_strdup_printf ("udp://%s:%d", destination, stream->rtcp_port);
+    /* rfc4570 3.2.1. Source-Specific Multicast Example */
+    if (stream->src_incl_list) {
+      uri = g_strdup_printf ("udp://%s:%d?multicast-source=%s",
+          destination, stream->rtcp_port, stream->src_incl_list);
+    } else {
+      uri = g_strdup_printf ("udp://%s:%d", destination, stream->rtcp_port);
+    }
     stream->udpsrc[1] =
         gst_element_make_from_uri (GST_URI_SRC, uri, NULL, NULL);
     g_free (uri);

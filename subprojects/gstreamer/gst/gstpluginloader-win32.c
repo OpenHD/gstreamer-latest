@@ -156,6 +156,7 @@ typedef struct
    * binary chunk format: 64 bytes
    * architecture: 64 bytes */
   guint8 version_info[GST_PLUGIN_LOADER_VERSION_INFO_SIZE];
+  gboolean apc_called;
 } Win32PluginLoader;
 
 struct _GstPluginLoader
@@ -168,6 +169,7 @@ struct _GstPluginLoader
   wchar_t *env_string;
 
   PROCESS_INFORMATION child_info;
+  LARGE_INTEGER frequency;
 
   gboolean got_plugin_detail;
   gboolean client_running;
@@ -286,6 +288,8 @@ gst_plugin_loader_try_helper (GstPluginLoader * self, gchar * location)
   DWORD wait_ret;
   gchar *pipe_name = NULL;
   HANDLE waitables[2];
+  LARGE_INTEGER now;
+  LONGLONG timeout;
 
   memset (&si, 0, sizeof (STARTUPINFOW));
   si.cb = sizeof (STARTUPINFOW);
@@ -317,6 +321,7 @@ gst_plugin_loader_try_helper (GstPluginLoader * self, gchar * location)
   loader->overlap.InternalHigh = 0;
   loader->overlap.Offset = 0;
   loader->overlap.OffsetHigh = 0;
+  loader->apc_called = FALSE;
 
   /* Async pipe should return zero */
   if (ConnectNamedPipe (loader->pipe, &loader->overlap)) {
@@ -352,26 +357,60 @@ gst_plugin_loader_try_helper (GstPluginLoader * self, gchar * location)
     goto error;
   }
 
+  ret = QueryPerformanceCounter (&now);
+  g_assert (ret);
+
+  /* 10 seconds timeout */
+  timeout = now.QuadPart + 10 * self->frequency.QuadPart;
+
   /* Wait for client connection */
   waitables[0] = loader->overlap.hEvent;
   waitables[1] = self->child_info.hProcess;
-  wait_ret = WaitForMultipleObjectsEx (2, waitables, FALSE, 5000, TRUE);
-  if (wait_ret == WAIT_OBJECT_0) {
-    ret = GetOverlappedResult (loader->pipe, &loader->overlap, &n_bytes, FALSE);
-    if (!ret) {
-      last_err = GetLastError ();
-      err = g_win32_error_message (last_err);
-      GST_ERROR ("GetOverlappedResult failed with 0x%x (%s)",
-          last_err, GST_STR_NULL (err));
-      goto kill_child;
+  do {
+    wait_ret = WaitForMultipleObjectsEx (2, waitables, FALSE, 5000, TRUE);
+    switch (wait_ret) {
+      case WAIT_OBJECT_0:
+        ret = GetOverlappedResult (loader->pipe,
+            &loader->overlap, &n_bytes, FALSE);
+        if (!ret) {
+          last_err = GetLastError ();
+          err = g_win32_error_message (last_err);
+          GST_ERROR ("GetOverlappedResult failed with 0x%x (%s)",
+              last_err, GST_STR_NULL (err));
+          goto kill_child;
+        }
+        break;
+      case WAIT_OBJECT_0 + 1:
+        GST_ERROR ("Child process got terminated");
+        goto kill_child;
+      case WAIT_IO_COMPLETION:
+        ret = QueryPerformanceCounter (&now);
+        g_assert (ret);
+
+        if (now.QuadPart > timeout) {
+          GST_ERROR ("Connection takes too long, give up");
+          goto kill_child;
+        }
+
+        if (loader->apc_called) {
+          GST_WARNING
+              ("Unexpected our APC called while waiting for client connection");
+        } else {
+          GST_DEBUG ("WAIT_IO_COMPLETION, waiting again");
+        }
+        break;
+      case WAIT_TIMEOUT:
+        GST_ERROR ("WaitForMultipleObjectsEx timeout");
+        goto kill_child;
+      default:
+        last_err = GetLastError ();
+        err = g_win32_error_message (last_err);
+        GST_ERROR
+            ("Unexpected WaitForMultipleObjectsEx return 0x%x, with 0x%x (%s)",
+            (guint) wait_ret, last_err, GST_STR_NULL (err));
+        goto kill_child;
     }
-  } else {
-    last_err = GetLastError ();
-    err = g_win32_error_message (last_err);
-    GST_ERROR ("Unexpected WaitForSingleObjectEx return 0x%x, with 0x%x (%s)",
-        (guint) wait_ret, last_err, GST_STR_NULL (err));
-    goto kill_child;
-  }
+  } while (wait_ret == WAIT_IO_COMPLETION);
 
   /* Do version check */
   loader->expected_pkt = PACKET_VERSION;
@@ -412,74 +451,6 @@ error:
   return FALSE;
 }
 
-static int
-count_directories (const char *filepath)
-{
-  int i = 0;
-  char *tmp;
-  gsize len;
-
-  g_return_val_if_fail (!g_path_is_absolute (filepath), 0);
-
-  tmp = g_strdup (filepath);
-  len = strlen (tmp);
-
-  /* ignore UNC share paths entirely */
-  if (len >= 3 && G_IS_DIR_SEPARATOR (tmp[0]) && G_IS_DIR_SEPARATOR (tmp[1])
-      && !G_IS_DIR_SEPARATOR (tmp[2])) {
-    GST_WARNING ("found a UNC share path, ignoring");
-    return 0;
-  }
-
-  /* remove trailing slashes if they exist */
-  while (
-      /* don't remove the trailing slash for C:\.
-       * UNC paths are at least \\s\s */
-      len > 3 && G_IS_DIR_SEPARATOR (tmp[len - 1])) {
-    tmp[len - 1] = '\0';
-    len--;
-  }
-
-  while (tmp) {
-    char *dirname, *basename;
-    len = strlen (tmp);
-
-    if (g_strcmp0 (tmp, ".") == 0)
-      break;
-    if (g_strcmp0 (tmp, "/") == 0)
-      break;
-
-    /* g_path_get_dirname() may return something of the form 'C:.', where C is
-     * a drive letter */
-    if (len == 3 && g_ascii_isalpha (tmp[0]) && tmp[1] == ':' && tmp[2] == '.')
-      break;
-
-    basename = g_path_get_basename (tmp);
-    dirname = g_path_get_dirname (tmp);
-
-    if (g_strcmp0 (basename, "..") == 0) {
-      i--;
-    } else if (g_strcmp0 (basename, ".") == 0) {
-      /* nothing to do */
-    } else {
-      i++;
-    }
-
-    g_clear_pointer (&basename, g_free);
-    g_clear_pointer (&tmp, g_free);
-    tmp = dirname;
-  }
-
-  g_clear_pointer (&tmp, g_free);
-
-  if (i < 0) {
-    g_critical ("path counting resulted in a negative directory count!");
-    return 0;
-  }
-
-  return i;
-}
-
 static gboolean
 gst_plugin_loader_spawn (GstPluginLoader * loader)
 {
@@ -511,7 +482,7 @@ gst_plugin_loader_spawn (GstPluginLoader * loader)
 
     relocated_libgstreamer = priv_gst_get_relocated_libgstreamer ();
     if (relocated_libgstreamer) {
-      int plugin_subdir_depth = count_directories (GST_PLUGIN_SUBDIR);
+      int plugin_subdir_depth = priv_gst_count_directories (GST_PLUGIN_SUBDIR);
 
       GST_DEBUG ("found libgstreamer-" GST_API_VERSION " library "
           "at %s", relocated_libgstreamer);
@@ -543,6 +514,8 @@ gst_plugin_loader_spawn (GstPluginLoader * loader)
       helper_bin = g_strdup (GST_PLUGIN_SCANNER_INSTALLED);
     }
 
+#undef MAX_PATH_DEPTH
+
     GST_DEBUG ("using system plugin scanner at %s", helper_bin);
 
     res = gst_plugin_loader_try_helper (loader, helper_bin);
@@ -563,6 +536,8 @@ win32_plugin_loader_write_payload_finish (DWORD error_code, DWORD n_bytes,
   Win32PluginLoader *self = (Win32PluginLoader *) overlapped;
   PacketHeader *header = &self->tx_header;
 
+  self->apc_called = TRUE;
+
   if (error_code != ERROR_SUCCESS)
     SET_ERROR_AND_RETURN (self, error_code);
 
@@ -581,6 +556,8 @@ win32_plugin_loader_write_header_finish (DWORD error_code, DWORD n_bytes,
 {
   Win32PluginLoader *self = (Win32PluginLoader *) overlapped;
   PacketHeader *header = &self->tx_header;
+
+  self->apc_called = TRUE;
 
   if (error_code != ERROR_SUCCESS)
     SET_ERROR_AND_RETURN (self, error_code);
@@ -855,6 +832,8 @@ win32_plugin_loader_read_payload_finish (DWORD error_code, DWORD n_bytes,
   Win32PluginLoader *self = (Win32PluginLoader *) overlapped;
   PacketHeader *header = &self->rx_header;
 
+  self->apc_called = TRUE;
+
   if (error_code != ERROR_SUCCESS)
     SET_ERROR_AND_RETURN (self, error_code);
 
@@ -873,6 +852,8 @@ win32_plugin_loader_read_header_finish (DWORD error_code, DWORD n_bytes,
 {
   Win32PluginLoader *self = (Win32PluginLoader *) overlapped;
   PacketHeader *header = &self->rx_header;
+
+  self->apc_called = TRUE;
 
   if (error_code != ERROR_SUCCESS)
     SET_ERROR_AND_RETURN (self, error_code);
@@ -1016,6 +997,7 @@ gst_plugin_loader_new (GstRegistry * registry)
   guint i;
   wchar_t lib_dir[MAX_PATH];
   wchar_t *origin_path = NULL;
+  BOOL ret;
 
   if (!registry)
     return NULL;
@@ -1087,6 +1069,10 @@ gst_plugin_loader_new (GstRegistry * registry)
 
   free (origin_path);
   FreeEnvironmentStringsW (env_str);
+
+  ret = QueryPerformanceFrequency (&self->frequency);
+  /* Must not return zero */
+  g_assert (ret);
 
   return self;
 }
@@ -1224,6 +1210,25 @@ gst_plugin_loader_free (GstPluginLoader * self)
   return got_plugin_detail;
 }
 
+static HANDLE
+gst_plugin_loader_client_create_file (LPCWSTR pipe_name)
+{
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+  CREATEFILE2_EXTENDED_PARAMETERS params;
+  memset (&params, 0, sizeof (CREATEFILE2_EXTENDED_PARAMETERS));
+  params.dwSize = sizeof (CREATEFILE2_EXTENDED_PARAMETERS);
+  params.dwFileFlags = FILE_FLAG_OVERLAPPED;
+  params.dwSecurityQosFlags = SECURITY_IMPERSONATION;
+
+  return CreateFile2 (pipe_name,
+      GENERIC_READ | GENERIC_WRITE, 0, OPEN_EXISTING, &params);
+#else
+  return CreateFileW (pipe_name,
+      GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+      FILE_FLAG_OVERLAPPED, NULL);
+#endif
+}
+
 /* child process routine */
 gboolean
 _gst_plugin_loader_client_run (const gchar * pipe_name)
@@ -1232,25 +1237,27 @@ _gst_plugin_loader_client_run (const gchar * pipe_name)
   Win32PluginLoader loader;
   DWORD pipe_mode = PIPE_READMODE_MESSAGE;
   gchar *err = NULL;
+  LPWSTR pipe_name_wide;
+
+  pipe_name_wide = (LPWSTR) g_utf8_to_utf16 (pipe_name, -1, NULL, NULL, NULL);
+  if (!pipe_name_wide) {
+    GST_ERROR ("Couldn't convert %s to wide string", pipe_name);
+    return FALSE;
+  }
 
   win32_plugin_loader_init (&loader, TRUE);
 
   GST_DEBUG ("Connecting pipe %s", pipe_name);
 
   /* Connect to server's named pipe */
-  loader.pipe = CreateFileA (pipe_name,
-      GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-      FILE_FLAG_OVERLAPPED, NULL);
+  loader.pipe = gst_plugin_loader_client_create_file (pipe_name_wide);
   loader.last_err = GetLastError ();
   if (loader.pipe == INVALID_HANDLE_VALUE) {
     /* Server should be pending (waiting for connection) state already,
      * but do retry if it's not the case */
     if (loader.last_err == ERROR_PIPE_BUSY) {
-      if (WaitNamedPipeA (pipe_name, 5000)) {
-        loader.pipe = CreateFileA (pipe_name,
-            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-            FILE_FLAG_OVERLAPPED, NULL);
-      }
+      if (WaitNamedPipeW (pipe_name_wide, 5000))
+        loader.pipe = gst_plugin_loader_client_create_file (pipe_name_wide);
 
       loader.last_err = GetLastError ();
     }
@@ -1285,6 +1292,7 @@ _gst_plugin_loader_client_run (const gchar * pipe_name)
 
 out:
   g_free (err);
+  g_free (pipe_name_wide);
   win32_plugin_loader_clear (&loader);
 
   return ret;

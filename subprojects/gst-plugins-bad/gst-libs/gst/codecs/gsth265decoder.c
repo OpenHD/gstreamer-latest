@@ -136,6 +136,8 @@ struct _GstH265DecoderPrivate
   GstQueueArray *output_queue;
 
   gboolean input_state_changed;
+
+  GstFlowReturn last_flow;
 };
 
 typedef struct
@@ -218,6 +220,7 @@ gst_h265_decoder_init (GstH265Decoder * self)
   GstH265DecoderPrivate *priv;
 
   gst_video_decoder_set_packetized (GST_VIDEO_DECODER (self), TRUE);
+  gst_video_decoder_set_needs_format (GST_VIDEO_DECODER (self), TRUE);
 
   self->priv = priv = gst_h265_decoder_get_instance_private (self);
 
@@ -266,6 +269,7 @@ gst_h265_decoder_start (GstVideoDecoder * decoder)
   priv->dpb = gst_h265_dpb_new ();
   priv->new_bitstream = TRUE;
   priv->prev_nal_is_eos = FALSE;
+  priv->last_flow = GST_FLOW_OK;
 
   return TRUE;
 }
@@ -362,17 +366,19 @@ gst_h265_decoder_set_latency (GstH265Decoder * self, const GstH265SPS * sps,
   guint frames_delay;
 
   caps = gst_pad_get_current_caps (GST_VIDEO_DECODER_SRC_PAD (self));
-  if (!caps)
-    return;
+  if (!caps && self->input_state)
+    caps = gst_caps_ref (self->input_state->caps);
 
-  structure = gst_caps_get_structure (caps, 0);
-  if (gst_structure_get_fraction (structure, "framerate", &fps_n, &fps_d)) {
-    if (fps_n == 0) {
-      /* variable framerate: see if we have a max-framerate */
-      gst_structure_get_fraction (structure, "max-framerate", &fps_n, &fps_d);
+  if (caps) {
+    structure = gst_caps_get_structure (caps, 0);
+    if (gst_structure_get_fraction (structure, "framerate", &fps_n, &fps_d)) {
+      if (fps_n == 0) {
+        /* variable framerate: see if we have a max-framerate */
+        gst_structure_get_fraction (structure, "max-framerate", &fps_n, &fps_d);
+      }
     }
+    gst_caps_unref (caps);
   }
-  gst_caps_unref (caps);
 
   /* if no fps or variable, then 25/1 */
   if (fps_n == 0) {
@@ -421,23 +427,68 @@ gst_h265_decoder_set_latency (GstH265Decoder * self, const GstH265SPS * sps,
   gst_video_decoder_set_latency (GST_VIDEO_DECODER (self), min, max);
 }
 
-static GstFlowReturn
-gst_h265_decoder_process_sps (GstH265Decoder * self, GstH265SPS * sps)
+typedef struct
 {
-  GstH265DecoderPrivate *priv = self->priv;
-  gint max_dpb_size;
-  gint prev_max_dpb_size;
-  gint MaxLumaPS;
-  const gint MaxDpbPicBuf = 6;
-  gint PicSizeInSamplesY;
-  guint8 field_seq_flag = 0;
-  guint8 progressive_source_flag = 0;
-  guint8 interlaced_source_flag = 0;
-  GstFlowReturn ret = GST_FLOW_OK;
+  const gchar *level_name;
+  guint8 level_idc;
+  guint32 MaxLumaPs;
+} GstH265LevelLimits;
 
-  /* A.4.1 */
-  MaxLumaPS = 35651584;
+/* *INDENT-OFF* */
+/* Table A.8 - General tier and level limits */
+static const GstH265LevelLimits level_limits[] = {
+  /* level    idc   MaxLumaPs */
+  {  "1",     30,    36864    },
+  {  "2",     60,    122880   },
+  {  "2.1",   63,    245760   },
+  {  "3",     90,    552960   },
+  {  "3.1",   93,    983040   },
+  {  "4",     120,   2228224  },
+  {  "4.1",   123,   2228224  },
+  {  "5",     150,   8912896  },
+  {  "5.1",   153,   8912896  },
+  {  "5.2",   156,   8912896  },
+  {  "6",     180,   35651584 },
+  {  "6.1",   183,   35651584 },
+  {  "6.2",   186,   35651584 },
+};
+/* *INDENT-ON* */
+
+static gint
+gst_h265_decoder_get_max_dpb_size_from_sps (GstH265Decoder * self,
+    GstH265SPS * sps)
+{
+  guint i;
+  guint PicSizeInSamplesY;
+  /* Default is the worst case level 6.2 */
+  guint32 MaxLumaPS = G_MAXUINT32;
+  const gint MaxDpbPicBuf = 6;
+  gint max_dpb_size;
+
+  /* Unknown level */
+  if (sps->profile_tier_level.level_idc == 0)
+    return 16;
+
   PicSizeInSamplesY = sps->width * sps->height;
+  for (i = 0; i < G_N_ELEMENTS (level_limits); i++) {
+    if (sps->profile_tier_level.level_idc <= level_limits[i].level_idc) {
+      if (PicSizeInSamplesY <= level_limits[i].MaxLumaPs) {
+        MaxLumaPS = level_limits[i].MaxLumaPs;
+      } else {
+        GST_DEBUG_OBJECT (self,
+            "%u (%dx%d) exceeds allowed max luma sample for level \"%s\" %u",
+            PicSizeInSamplesY, sps->width, sps->height,
+            level_limits[i].level_name, level_limits[i].MaxLumaPs);
+      }
+      break;
+    }
+  }
+
+  /* Unknown level */
+  if (MaxLumaPS == G_MAXUINT32)
+    return 16;
+
+  /* A.4.2 */
   if (PicSizeInSamplesY <= (MaxLumaPS >> 2))
     max_dpb_size = MaxDpbPicBuf * 4;
   else if (PicSizeInSamplesY <= (MaxLumaPS >> 1))
@@ -447,7 +498,21 @@ gst_h265_decoder_process_sps (GstH265Decoder * self, GstH265SPS * sps)
   else
     max_dpb_size = MaxDpbPicBuf;
 
-  max_dpb_size = MIN (max_dpb_size, 16);
+  return MIN (max_dpb_size, 16);
+}
+
+static GstFlowReturn
+gst_h265_decoder_process_sps (GstH265Decoder * self, GstH265SPS * sps)
+{
+  GstH265DecoderPrivate *priv = self->priv;
+  gint max_dpb_size;
+  gint prev_max_dpb_size;
+  guint8 field_seq_flag = 0;
+  guint8 progressive_source_flag = 0;
+  guint8 interlaced_source_flag = 0;
+  GstFlowReturn ret = GST_FLOW_OK;
+
+  max_dpb_size = gst_h265_decoder_get_max_dpb_size_from_sps (self, sps);
 
   if (sps->vui_parameters_present_flag)
     field_seq_flag = sps->vui_params.field_seq_flag;
@@ -1001,80 +1066,66 @@ gst_h265_decoder_parse_codec_data (GstH265Decoder * self, const guint8 * data,
     gsize size)
 {
   GstH265DecoderPrivate *priv = self->priv;
-  guint num_nal_arrays;
-  guint off;
-  guint num_nals, i, j;
+  GstH265Parser *parser = priv->parser;
   GstH265ParserResult pres;
-  GstH265NalUnit nalu;
+  GstFlowReturn ret = GST_FLOW_ERROR;
   GstH265VPS vps;
   GstH265SPS sps;
   GstH265PPS pps;
+  GstH265DecoderConfigRecord *config = NULL;
+  guint i, j;
 
-  /* parse the hvcC data */
-  if (size < 23) {
-    GST_WARNING_OBJECT (self, "hvcC too small");
+  pres = gst_h265_parser_parse_decoder_config_record (parser,
+      data, size, &config);
+  if (pres != GST_H265_PARSER_OK) {
+    GST_WARNING_OBJECT (self, "Failed to parse hvcC data");
     return GST_FLOW_ERROR;
   }
 
-  /* wrong hvcC version */
-  if (data[0] != 0 && data[0] != 1) {
-    return GST_FLOW_ERROR;
-  }
-
-  priv->nal_length_size = (data[21] & 0x03) + 1;
+  priv->nal_length_size = config->length_size_minus_one + 1;
   GST_DEBUG_OBJECT (self, "nal length size %u", priv->nal_length_size);
 
-  num_nal_arrays = data[22];
-  off = 23;
+  for (i = 0; i < config->nalu_array->len; i++) {
+    GstH265DecoderConfigRecordNalUnitArray *array =
+        &g_array_index (config->nalu_array,
+        GstH265DecoderConfigRecordNalUnitArray, i);
 
-  for (i = 0; i < num_nal_arrays; i++) {
-    if (off + 3 >= size) {
-      GST_WARNING_OBJECT (self, "hvcC too small");
-      return GST_FLOW_ERROR;
-    }
+    for (j = 0; j < array->nalu->len; j++) {
+      GstH265NalUnit *nalu = &g_array_index (array->nalu, GstH265NalUnit, j);
 
-    num_nals = GST_READ_UINT16_BE (data + off + 1);
-    off += 3;
-    for (j = 0; j < num_nals; j++) {
-      pres = gst_h265_parser_identify_nalu_hevc (priv->parser,
-          data, off, size, 2, &nalu);
-
-      if (pres != GST_H265_PARSER_OK) {
-        GST_WARNING_OBJECT (self, "hvcC too small");
-        return GST_FLOW_ERROR;
-      }
-
-      switch (nalu.type) {
+      switch (nalu->type) {
         case GST_H265_NAL_VPS:
-          pres = gst_h265_parser_parse_vps (priv->parser, &nalu, &vps);
+          pres = gst_h265_parser_parse_vps (parser, nalu, &vps);
           if (pres != GST_H265_PARSER_OK) {
             GST_WARNING_OBJECT (self, "Failed to parse VPS");
-            return GST_FLOW_ERROR;
+            goto out;
           }
           break;
         case GST_H265_NAL_SPS:
-          pres = gst_h265_parser_parse_sps (priv->parser, &nalu, &sps, TRUE);
+          pres = gst_h265_parser_parse_sps (parser, nalu, &sps, TRUE);
           if (pres != GST_H265_PARSER_OK) {
             GST_WARNING_OBJECT (self, "Failed to parse SPS");
-            return GST_FLOW_ERROR;
+            goto out;
           }
           break;
         case GST_H265_NAL_PPS:
-          pres = gst_h265_parser_parse_pps (priv->parser, &nalu, &pps);
+          pres = gst_h265_parser_parse_pps (parser, nalu, &pps);
           if (pres != GST_H265_PARSER_OK) {
             GST_WARNING_OBJECT (self, "Failed to parse PPS");
-            return GST_FLOW_ERROR;
+            goto out;
           }
           break;
         default:
           break;
       }
-
-      off = nalu.offset + nalu.size;
     }
   }
 
-  return GST_FLOW_OK;
+  ret = GST_FLOW_OK;
+
+out:
+  gst_h265_decoder_config_record_free (config);
+  return ret;
 }
 
 static gboolean
@@ -1648,7 +1699,6 @@ gst_h265_decoder_do_output_picture (GstH265Decoder * self,
   GstH265DecoderPrivate *priv = self->priv;
   GstVideoCodecFrame *frame = NULL;
   GstH265DecoderOutputFrame output_frame;
-  GstFlowReturn flow_ret = GST_FLOW_OK;
 
   g_assert (ret != NULL);
 
@@ -1682,8 +1732,7 @@ gst_h265_decoder_do_output_picture (GstH265Decoder * self,
   gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
 
   gst_h265_decoder_drain_output_queue (self, priv->preferred_output_delay,
-      &flow_ret);
-  UPDATE_FLOW_RETURN (ret, flow_ret);
+      &priv->last_flow);
 }
 
 static void
@@ -1743,7 +1792,7 @@ gst_h265_decoder_dpb_init (GstH265Decoder * self, const GstH265Slice * slice,
   if (slice->clear_dpb) {
     if (picture->NoOutputOfPriorPicsFlag) {
       GST_DEBUG_OBJECT (self, "Clear dpb");
-      gst_h265_decoder_drain_output_queue (self, 0, &ret);
+      gst_h265_decoder_drain_output_queue (self, 0, &priv->last_flow);
       gst_h265_decoder_clear_dpb (self, FALSE);
     } else {
       gst_h265_dpb_delete_unused (priv->dpb);
@@ -1951,6 +2000,7 @@ gst_h265_decoder_handle_frame (GstVideoDecoder * decoder,
 
   gst_h265_decoder_reset_frame_state (self);
 
+  priv->last_flow = GST_FLOW_OK;
   priv->current_frame = frame;
 
   if (!gst_buffer_map (in_buf, &map, GST_MAP_READ)) {
@@ -2018,7 +2068,7 @@ gst_h265_decoder_handle_frame (GstVideoDecoder * decoder,
           ("Failed to decode data"), (NULL), decode_ret);
     }
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
     gst_clear_h265_picture (&priv->current_picture);
 
     return decode_ret;
@@ -2030,6 +2080,12 @@ gst_h265_decoder_handle_frame (GstVideoDecoder * decoder,
   } else {
     /* This picture was dropped */
     gst_video_decoder_release_frame (decoder, frame);
+  }
+
+  if (priv->last_flow != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Last flow %s", gst_flow_get_name (priv->last_flow));
+    return priv->last_flow;
   }
 
   if (decode_ret == GST_FLOW_ERROR) {

@@ -140,6 +140,7 @@ static void
 gst_vp9_decoder_init (GstVp9Decoder * self)
 {
   gst_video_decoder_set_packetized (GST_VIDEO_DECODER (self), TRUE);
+  gst_video_decoder_set_needs_format (GST_VIDEO_DECODER (self), TRUE);
 
   self->priv = gst_vp9_decoder_get_instance_private (self);
 
@@ -250,7 +251,8 @@ gst_vp9_decoder_check_codec_change (GstVp9Decoder * self,
   }
 
   ret = klass->new_sequence (self, frame_hdr,
-      GST_VP9_REF_FRAMES + priv->preferred_output_delay);
+      /* +1 for the current frame */
+      GST_VP9_REF_FRAMES + 1 + priv->preferred_output_delay);
 
   if (ret != GST_FLOW_OK)
     priv->had_sequence = FALSE;
@@ -375,6 +377,7 @@ gst_vp9_decoder_handle_frame (GstVideoDecoder * decoder,
   GstVp9ParserResult pres;
   GstMapInfo map;
   GstFlowReturn ret = GST_FLOW_OK;
+  GstFlowReturn output_ret = GST_FLOW_OK;
   gboolean intra_only = FALSE;
   gboolean check_codec_change = FALSE;
   GstVp9DecoderOutputFrame output_frame;
@@ -559,7 +562,13 @@ gst_vp9_decoder_handle_frame (GstVideoDecoder * decoder,
     gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
   }
 
-  gst_vp9_decoder_drain_output_queue (self, priv->preferred_output_delay, &ret);
+  gst_vp9_decoder_drain_output_queue (self,
+      priv->preferred_output_delay, &output_ret);
+  if (output_ret != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Output returned %s", gst_flow_get_name (output_ret));
+    return output_ret;
+  }
 
   if (ret == GST_FLOW_ERROR) {
     GST_VIDEO_DECODER_ERROR (self, 1, STREAM, DECODE,
@@ -585,7 +594,7 @@ error:
           ("Failed to decode data"), (NULL), ret);
     }
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
 
     return ret;
   }

@@ -569,7 +569,7 @@ gst_splitmux_sink_class_init (GstSplitMuxSinkClass * klass)
    * @splitmux: the #GstSplitMuxSink
    * @muxer: the newly added muxer element
    *
-   * Since: 1.14
+   * Since: 1.16
    */
   signals[SIGNAL_MUXER_ADDED] =
       g_signal_new ("muxer-added", G_TYPE_FROM_CLASS (klass),
@@ -580,7 +580,7 @@ gst_splitmux_sink_class_init (GstSplitMuxSinkClass * klass)
    * @splitmux: the #GstSplitMuxSink
    * @sink: the newly added sink element
    *
-   * Since: 1.14
+   * Since: 1.16
    */
   signals[SIGNAL_SINK_ADDED] =
       g_signal_new ("sink-added", G_TYPE_FROM_CLASS (klass),
@@ -2947,10 +2947,16 @@ handle_mq_input (GstPad * pad, GstPadProbeInfo * info, MqStreamCtx * ctx)
   else
     running_time_pts = GST_CLOCK_STIME_NONE;
 
-  if (GST_CLOCK_TIME_IS_VALID (dts))
+  if (GST_CLOCK_TIME_IS_VALID (dts)) {
     running_time_dts = my_segment_to_running_time (&ctx->in_segment, dts);
-  else
-    running_time_dts = GST_CLOCK_STIME_NONE;
+
+    /* DTS > PTS makes conceptually no sense so catch such invalid DTS here
+     * by clamping to the PTS */
+    running_time_dts = MIN (running_time_pts, running_time_dts);
+  } else {
+    /* If there is no DTS then assume PTS=DTS */
+    running_time_dts = running_time_pts;
+  }
 
   /* Try to make sure we have a valid running time */
   if (!GST_CLOCK_STIME_IS_VALID (ctx->in_running_time)) {
@@ -3178,13 +3184,11 @@ handle_mq_input (GstPad * pad, GstPadProbeInfo * info, MqStreamCtx * ctx)
         }
         break;
       case SPLITMUX_INPUT_STATE_WAITING_GOP_COLLECT:{
-        /* We're collecting a GOP, this is normally only called for non-reference
+        /* We're collecting a GOP, this is only ever called for non-reference
          * contexts as the reference context would be waiting inside
          * check_completed_gop() */
-        if (G_UNLIKELY (ctx->is_reference)) {
-          check_completed_gop (splitmux, ctx);
-          break;
-        }
+
+        g_assert (!ctx->is_reference);
 
         /* If we overran the target timestamp, it might be time to process
          * the GOP, otherwise bail out for more data. */

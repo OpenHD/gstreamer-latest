@@ -1256,7 +1256,7 @@ gst_rtspsrc_class_init (GstRTSPSrcClass * klass)
   gst_rtspsrc_signals[SIGNAL_PUSH_BACKCHANNEL_SAMPLE] =
       g_signal_new ("push-backchannel-sample", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION | G_SIGNAL_DEPRECATED,
-      G_STRUCT_OFFSET (GstRTSPSrcClass, push_backchannel_buffer), NULL, NULL,
+      G_STRUCT_OFFSET (GstRTSPSrcClass, push_backchannel_sample), NULL, NULL,
       NULL, GST_TYPE_FLOW_RETURN, 2, G_TYPE_UINT, GST_TYPE_SAMPLE);
 
   /**
@@ -2301,6 +2301,13 @@ gst_rtspsrc_collect_payloads (GstRTSPSrc * src, const GstSDPMessage * sdp,
     outcaps = gst_caps_intersect (caps, global_caps);
     gst_caps_unref (caps);
 
+    if (gst_caps_is_empty (outcaps)) {
+      GST_WARNING_OBJECT (src,
+          " skipping pt %d with caps conflicting with the global caps", pt);
+      gst_caps_unref (outcaps);
+      continue;
+    }
+
     /* the first pt will be the default */
     if (stream->ptmap->len == 0)
       stream->default_pt = pt;
@@ -2442,7 +2449,7 @@ gst_rtspsrc_create_stream (GstRTSPSrc * src, GstSDPMessage * sdp, gint idx,
 
       base = get_aggregate_control (src);
       if (g_strcmp0 (control_path, "*") == 0)
-        control_path = g_strdup (base);
+        stream->conninfo.location = g_strdup (base);
       else
         stream->conninfo.location = gst_uri_join_strings (base, control_path);
     }
@@ -2970,7 +2977,7 @@ gst_rtspsrc_perform_seek (GstRTSPSrc * src, GstEvent * event)
 
   /* If an accurate seek was requested, we want to clip the segment we
    * output in ONVIF mode to the requested bounds */
-  src->clip_out_segment = ! !(flags & GST_SEEK_FLAG_ACCURATE);
+  src->clip_out_segment = !!(flags & GST_SEEK_FLAG_ACCURATE);
   src->seek_seqnum = gst_event_get_seqnum (event);
 
   /* prepare for streaming again */
@@ -3149,11 +3156,10 @@ gst_rtspsrc_handle_src_sink_event (GstPad * pad, GstObject * parent,
     GstEvent * event)
 {
   GstRTSPStream *stream;
-  GstRTSPSrc *self = GST_RTSPSRC (GST_OBJECT_PARENT (parent));
 
   stream = gst_pad_get_element_private (pad);
 
-  event = gst_rtspsrc_update_src_event (self, stream, event);
+  event = gst_rtspsrc_update_src_event (stream->parent, stream, event);
 
   return gst_pad_push_event (stream->srcpad, event);
 }
@@ -7721,6 +7727,7 @@ gst_rtspsrc_setup_streams_start (GstRTSPSrc * src, gboolean async)
       case GST_RTSP_STS_BAD_REQUEST:
       case GST_RTSP_STS_NOT_FOUND:
       case GST_RTSP_STS_METHOD_NOT_VALID_IN_THIS_STATE:
+      case GST_RTSP_STS_PARAMETER_NOT_UNDERSTOOD:
         /* There are various non-compliant servers that don't require control
          * URLs that are not resolved correctly but instead are just appended.
          * See e.g.
@@ -9333,21 +9340,33 @@ gst_rtspsrc_thread (GstRTSPSrc * src)
 
   GST_OBJECT_LOCK (src);
   cmd = src->pending_cmd;
-  if (cmd == CMD_RECONNECT || cmd == CMD_PLAY || cmd == CMD_PAUSE
-      || cmd == CMD_LOOP || cmd == CMD_OPEN || cmd == CMD_GET_PARAMETER
-      || cmd == CMD_SET_PARAMETER) {
-    if (g_queue_is_empty (&src->set_get_param_q)) {
-      src->pending_cmd = CMD_LOOP;
-    } else {
-      ParameterRequest *next_req;
-      if (cmd == CMD_GET_PARAMETER || cmd == CMD_SET_PARAMETER) {
-        req = g_queue_pop_head (&src->set_get_param_q);
+
+  switch (cmd) {
+    case CMD_CLOSE:
+      src->pending_cmd = CMD_WAIT;
+      break;
+    case CMD_GET_PARAMETER:
+    case CMD_SET_PARAMETER:
+      req = g_queue_pop_head (&src->set_get_param_q);
+      if (!req)
+        cmd = CMD_LOOP;
+      /* fall through */
+    case CMD_OPEN:
+    case CMD_PLAY:
+    case CMD_PAUSE:
+    case CMD_LOOP:
+    case CMD_RECONNECT:
+      if (g_queue_is_empty (&src->set_get_param_q)) {
+        src->pending_cmd = CMD_LOOP;
+      } else {
+        ParameterRequest *next_req;
+        next_req = g_queue_peek_head (&src->set_get_param_q);
+        src->pending_cmd = next_req->cmd;
       }
-      next_req = g_queue_peek_head (&src->set_get_param_q);
-      src->pending_cmd = next_req ? next_req->cmd : CMD_LOOP;
-    }
-  } else
-    src->pending_cmd = CMD_WAIT;
+      break;
+    default:
+      break;
+  }
   GST_DEBUG_OBJECT (src, "got command %s", cmd_to_string (cmd));
 
   /* we got the message command, so ensure communication is possible again */

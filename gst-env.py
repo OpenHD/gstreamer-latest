@@ -289,7 +289,7 @@ def get_subprocess_env(options, gst_version):
     env["GST_PLUGIN_SCANNER"] = os.path.normpath(
         "%s/subprojects/gstreamer/libs/gst/helpers/gst-plugin-scanner" % options.builddir)
     env["GST_PTP_HELPER"] = os.path.normpath(
-        "%s/subprojects/gstreamer/libs/gst/helpers/gst-ptp-helper" % options.builddir)
+        "%s/subprojects/gstreamer/libs/gst/helpers/ptp/gst-ptp-helper" % options.builddir)
 
     if os.name == 'nt':
         lib_path_envvar = 'PATH'
@@ -452,10 +452,6 @@ def get_subprocess_env(options, gst_version):
             elif path.endswith('.gep'):
                 encoding_targets.add(
                     os.path.abspath(os.path.join(os.path.dirname(path), '..')))
-
-            if path.endswith('gstomx.conf'):
-                prepend_env_var(env, 'GST_OMX_CONFIG_DIR', os.path.dirname(path),
-                                options.sysroot)
 
         for p in sorted(presets):
             prepend_env_var(env, 'GST_PRESET_PATH', p, options.sysroot)

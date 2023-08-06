@@ -46,6 +46,7 @@
 
 #include <gst/gst.h>
 #include <gst/base/gsttypefindhelper.h>
+#include <glib/gi18n-lib.h>
 
 #include "gstimagesequencesrc.h"
 
@@ -337,7 +338,7 @@ gst_image_sequence_src_class_init (GstImageSequenceSrcClass * klass)
   gst_element_class_set_static_metadata (gstelement_class,
       "Image Sequence Source", "Source/File/Video",
       "Create a video stream from a sequence of image files",
-      "Cesar Fabian Orccon Chipana <cfoch.fabian@gmail.com>\n"
+      "Cesar Fabian Orccon Chipana <cfoch.fabian@gmail.com>, "
       "Thibault Saunier <tsaunier@igalia.com>");
 }
 
@@ -356,7 +357,7 @@ gst_image_sequence_src_init (GstImageSequenceSrc * self)
   self->start_index = DEFAULT_START_INDEX;
   self->index = 0;
   self->stop_index = DEFAULT_STOP_INDEX;
-  self->path = NULL;
+  self->path = g_strdup (DEFAULT_LOCATION);
   self->caps = NULL;
   self->n_frames = 0;
   self->fps_n = 30;
@@ -564,7 +565,12 @@ gst_image_sequence_src_get_filename (GstImageSequenceSrc * self)
   gchar *filename;
 
   GST_DEBUG ("Reading filename at index %d.", self->index);
-  filename = g_strdup_printf (self->path, self->index);
+  if (self->path != NULL) {
+    filename = g_strdup_printf (self->path, self->index);
+  } else {
+    GST_WARNING_OBJECT (self, "No filename location set!");
+    filename = NULL;
+  }
 
   return filename;
 }
@@ -604,7 +610,7 @@ gst_image_sequence_src_create (GstPushSrc * src, GstBuffer ** buffer)
   UNLOCK (self);
 
   if (!filename)
-    goto handle_error;
+    goto error_no_filename;
 
   ret = g_file_get_contents (filename, &data, &size, &error);
   if (!ret)
@@ -645,6 +651,12 @@ gst_image_sequence_src_create (GstPushSrc * src, GstBuffer ** buffer)
   self->index += self->reverse ? -1 : 1;
   return GST_FLOW_OK;
 
+error_no_filename:
+  {
+    GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
+        (_("No file name specified for reading.")), (NULL));
+    return GST_FLOW_ERROR;
+  }
 handle_error:
   {
     if (error != NULL) {

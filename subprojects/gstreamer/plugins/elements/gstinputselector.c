@@ -853,6 +853,13 @@ gst_input_selector_wait_running_time (GstInputSelector * sel,
         continue;
       }
 
+      if (!sel->playing) {
+        GST_DEBUG_OBJECT (selpad, "Waiting for playing");
+        GST_INPUT_SELECTOR_WAIT (sel);
+        GST_DEBUG_OBJECT (selpad, "Done waiting");
+        continue;
+      }
+
       /* FIXME: If no upstream latency was queried yet, do one now */
       clock_id =
           gst_clock_new_single_shot_id (clock,
@@ -1432,6 +1439,7 @@ gst_input_selector_init (GstInputSelector * sel)
   g_mutex_init (&sel->lock);
   g_cond_init (&sel->cond);
   sel->eos = FALSE;
+  sel->playing = FALSE;
 
   sel->upstream_latency = 0;
   sel->last_output_ts = GST_CLOCK_TIME_NONE;
@@ -1534,7 +1542,7 @@ gst_input_selector_set_property (GObject * object, guint prop_id,
 
       GST_INPUT_SELECTOR_LOCK (sel);
 
-      sel->active_sinkpad_from_user = ! !pad;
+      sel->active_sinkpad_from_user = !!pad;
 #if DEBUG_CACHED_BUFFERS
       gst_input_selector_debug_cached_buffers (sel);
 #endif
@@ -2028,9 +2036,20 @@ gst_input_selector_change_state (GstElement * element,
       GST_INPUT_SELECTOR_BROADCAST (self);
       GST_INPUT_SELECTOR_UNLOCK (self);
       break;
+    case GST_STATE_CHANGE_PAUSED_TO_PLAYING:{
+      GST_INPUT_SELECTOR_LOCK (self);
+      self->playing = TRUE;
+      GST_INPUT_SELECTOR_BROADCAST (self);
+      GST_INPUT_SELECTOR_UNLOCK (self);
+      break;
+    }
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:{
       GList *walk;
 
+      GST_INPUT_SELECTOR_LOCK (self);
+      self->playing = FALSE;
+      GST_INPUT_SELECTOR_BROADCAST (self);
+      GST_OBJECT_LOCK (self);
       for (walk = GST_ELEMENT_CAST (self)->sinkpads; walk;
           walk = g_list_next (walk)) {
         GstSelectorPad *selpad = GST_SELECTOR_PAD_CAST (walk->data);
@@ -2039,6 +2058,8 @@ gst_input_selector_change_state (GstElement * element,
           gst_clock_id_unschedule (selpad->clock_id);
         }
       }
+      GST_OBJECT_UNLOCK (self);
+      GST_INPUT_SELECTOR_UNLOCK (self);
       break;
     }
     default:

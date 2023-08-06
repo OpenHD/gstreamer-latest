@@ -329,7 +329,7 @@ gst_flv_mux_init (GstFlvMux * mux)
   mux->metadatacreator = g_strdup (DEFAULT_METADATACREATOR);
   mux->encoder = g_strdup (DEFAULT_METADATACREATOR);
 
-  mux->new_tags = FALSE;
+  mux->new_metadata = FALSE;
 
   gst_flv_mux_reset (GST_ELEMENT (mux));
 }
@@ -384,7 +384,7 @@ gst_flv_mux_reset (GstElement * element)
   mux->byte_count = 0;
 
   mux->duration = GST_CLOCK_TIME_NONE;
-  mux->new_tags = FALSE;
+  mux->new_metadata = FALSE;
   mux->first_timestamp = GST_CLOCK_TIME_NONE;
   mux->last_dts = 0;
 
@@ -442,7 +442,7 @@ gst_flv_mux_sink_event (GstAggregator * aggregator, GstAggregatorPad * pad,
       gst_event_parse_tag (event, &list);
       gst_tag_setter_merge_tags (setter, list, mode);
       gst_flv_mux_store_codec_tags (mux, flvpad, list);
-      mux->new_tags = TRUE;
+      mux->new_metadata = TRUE;
       ret = TRUE;
       break;
     }
@@ -465,6 +465,8 @@ gst_flv_mux_video_pad_setcaps (GstFlvMuxPad * pad, GstCaps * caps)
   GstStructure *s;
   guint old_codec;
   GstBuffer *old_codec_data = NULL;
+
+  GST_DEBUG_OBJECT (pad, "%" GST_PTR_FORMAT, caps);
 
   old_codec = pad->codec;
   if (pad->codec_data)
@@ -497,6 +499,7 @@ gst_flv_mux_video_pad_setcaps (GstFlvMuxPad * pad, GstCaps * caps)
 
   if (ret && mux->streamable && mux->state != GST_FLV_MUX_STATE_HEADER) {
     if (old_codec != pad->codec) {
+      GST_DEBUG_OBJECT (pad, "pad info changed");
       pad->info_changed = TRUE;
     }
 
@@ -505,16 +508,21 @@ gst_flv_mux_video_pad_setcaps (GstFlvMuxPad * pad, GstCaps * caps)
 
       gst_buffer_map (old_codec_data, &map, GST_MAP_READ);
       if (map.size != gst_buffer_get_size (pad->codec_data) ||
-          gst_buffer_memcmp (pad->codec_data, 0, map.data, map.size))
+          gst_buffer_memcmp (pad->codec_data, 0, map.data, map.size)) {
+        GST_DEBUG_OBJECT (pad, "codec data changed");
         pad->info_changed = TRUE;
+      }
 
       gst_buffer_unmap (old_codec_data, &map);
     } else if (!old_codec_data && pad->codec_data) {
+      GST_DEBUG_OBJECT (pad, "codec data changed");
       pad->info_changed = TRUE;
     }
 
-    if (pad->info_changed)
+    if (pad->info_changed) {
       mux->state = GST_FLV_MUX_STATE_HEADER;
+      mux->new_metadata = TRUE;
+    }
   }
 
   if (old_codec_data)
@@ -533,6 +541,8 @@ gst_flv_mux_audio_pad_setcaps (GstFlvMuxPad * pad, GstCaps * caps)
   GstStructure *s;
   guint old_codec, old_rate, old_width, old_channels;
   GstBuffer *old_codec_data = NULL;
+
+  GST_DEBUG_OBJECT (pad, "%" GST_PTR_FORMAT, caps);
 
   old_codec = pad->codec;
   old_rate = pad->rate;
@@ -676,6 +686,7 @@ gst_flv_mux_audio_pad_setcaps (GstFlvMuxPad * pad, GstCaps * caps)
   if (ret && mux->streamable && mux->state != GST_FLV_MUX_STATE_HEADER) {
     if (old_codec != pad->codec || old_rate != pad->rate ||
         old_width != pad->width || old_channels != pad->channels) {
+      GST_DEBUG_OBJECT (pad, "pad info changed");
       pad->info_changed = TRUE;
     }
 
@@ -684,16 +695,21 @@ gst_flv_mux_audio_pad_setcaps (GstFlvMuxPad * pad, GstCaps * caps)
 
       gst_buffer_map (old_codec_data, &map, GST_MAP_READ);
       if (map.size != gst_buffer_get_size (pad->codec_data) ||
-          gst_buffer_memcmp (pad->codec_data, 0, map.data, map.size))
+          gst_buffer_memcmp (pad->codec_data, 0, map.data, map.size)) {
+        GST_DEBUG_OBJECT (pad, "codec data changed");
         pad->info_changed = TRUE;
+      }
 
       gst_buffer_unmap (old_codec_data, &map);
     } else if (!old_codec_data && pad->codec_data) {
+      GST_DEBUG_OBJECT (pad, "codec data changed");
       pad->info_changed = TRUE;
     }
 
-    if (pad->info_changed)
+    if (pad->info_changed) {
       mux->state = GST_FLV_MUX_STATE_HEADER;
+      mux->new_metadata = TRUE;
+    }
   }
 
   if (old_codec_data)
@@ -801,12 +817,6 @@ gst_flv_mux_release_pad (GstElement * element, GstPad * pad)
 static GstFlowReturn
 gst_flv_mux_push (GstFlvMux * mux, GstBuffer * buffer)
 {
-  GstAggregator *agg = GST_AGGREGATOR (mux);
-  GstAggregatorPad *srcpad = GST_AGGREGATOR_PAD (agg->srcpad);
-
-  if (GST_BUFFER_PTS_IS_VALID (buffer))
-    srcpad->segment.position = GST_BUFFER_PTS (buffer);
-
   /* pushing the buffer that rewrites the header will make it no longer be the
    * total output size in bytes, but it doesn't matter at that point */
   mux->byte_count += gst_buffer_get_size (buffer);
@@ -1589,7 +1599,7 @@ gst_flv_mux_write_header (GstFlvMux * mux)
     ret = gst_flv_mux_push (mux, metadata);
     if (ret != GST_FLOW_OK)
       goto failure_metadata;
-    mux->new_tags = FALSE;
+    mux->new_metadata = FALSE;
   }
   if (video_codec_data != NULL) {
     ret = gst_flv_mux_push (mux, video_codec_data);
@@ -1660,6 +1670,8 @@ gst_flv_mux_write_buffer (GstFlvMux * mux, GstFlvMuxPad * pad,
 {
   GstBuffer *tag;
   GstFlowReturn ret;
+  GstClockTime pts = GST_BUFFER_PTS (buffer);
+  GstClockTime duration = GST_BUFFER_DURATION (buffer);
   GstClockTime dts =
       gst_flv_mux_segment_to_running_time (&GST_AGGREGATOR_PAD (pad)->segment,
       GST_BUFFER_DTS (buffer));
@@ -1677,6 +1689,14 @@ gst_flv_mux_write_buffer (GstFlvMux * mux, GstFlvMuxPad * pad,
 
   if (ret == GST_FLOW_OK && GST_CLOCK_TIME_IS_VALID (dts))
     pad->last_timestamp = dts;
+
+  if (ret == GST_FLOW_OK && GST_CLOCK_TIME_IS_VALID (pts)) {
+    GstAggregator *agg = GST_AGGREGATOR (mux);
+    GstAggregatorPad *srcpad = GST_AGGREGATOR_PAD (agg->srcpad);
+    srcpad->segment.position = pts;
+    if (GST_CLOCK_TIME_IS_VALID (duration))
+      srcpad->segment.position += duration;
+  }
 
   return ret;
 }
@@ -2034,11 +2054,11 @@ gst_flv_mux_aggregate (GstAggregator * aggregator, gboolean timeout)
     }
   }
 
-  if (mux->new_tags && mux->streamable) {
+  if (mux->new_metadata && mux->streamable) {
     GstBuffer *buf = gst_flv_mux_create_metadata (mux);
     if (buf)
       gst_flv_mux_push (mux, buf);
-    mux->new_tags = FALSE;
+    mux->new_metadata = FALSE;
   }
 
   if (best) {

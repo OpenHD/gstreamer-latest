@@ -49,12 +49,12 @@
  * Since: 1.6
  *
  */
+#define _GNU_SOURCE 1
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
 #include "gstptpclock.h"
-#include "gstptp_private.h"
 
 #include <gio/gio.h>
 
@@ -68,6 +68,15 @@
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#endif
+
+#ifdef G_OS_WIN32
+#include <windows.h>
+static HMODULE gstnet_dll_handle = NULL;
+#endif
+
+#ifdef HAVE_DLFCN_H
+#include <dlfcn.h>
 #endif
 
 GST_DEBUG_CATEGORY_STATIC (ptp_debug);
@@ -228,6 +237,28 @@ typedef struct
   } message_specific;
 } PtpMessage;
 
+typedef enum
+{
+  TYPE_EVENT = 0,               /* 64-bit monotonic clock time and PTP message is payload */
+  TYPE_GENERAL = 1,             /* 64-bit monotonic clock time and PTP message is payload */
+  TYPE_CLOCK_ID = 2,            /* 64-bit clock ID is payload */
+  TYPE_SEND_TIME_ACK = 3,       /* 64-bit monotonic clock time, 8-bit message type, 8-bit domain number and 16-bit sequence number is payload */
+} StdIOMessageType;
+
+/* 2 byte BE payload size plus 1 byte message type */
+#define STDIO_MESSAGE_HEADER_SIZE (3)
+
+/* 2 byte BE payload size. Payload format:
+ * - 1 byte GstDebugLevel
+ * - 2 byte BE filename length
+ * - filename UTF-8 string
+ * - 2 byte BE module path length
+ * - module path UTF-8 string
+ * - 4 byte BE line number
+ * - remainder is UTF-8 string
+ */
+#define STDERR_MESSAGE_HEADER_SIZE (2)
+
 static GMutex ptp_lock;
 static GCond ptp_cond;
 static gboolean initted = FALSE;
@@ -238,15 +269,23 @@ static gboolean supported = FALSE;
 #endif
 static GSubprocess *ptp_helper_process;
 static GInputStream *stdout_pipe;
+static GInputStream *stderr_pipe;
 static GOutputStream *stdin_pipe;
-static StdIOHeader stdio_header;        /* buffer for reading */
-static gchar stdout_buffer[8192];       /* buffer for reading */
+static guint8 stdio_header[STDIO_MESSAGE_HEADER_SIZE];  /* buffer for reading the message header */
+static guint8 stdout_buffer[8192];      /* buffer for reading the message payload */
+static guint8 stderr_header[STDERR_MESSAGE_HEADER_SIZE];        /* buffer for reading the message header */
+static guint8 stderr_buffer[8192];      /* buffer for reading the message payload */
 static GThread *ptp_helper_thread;
 static GMainContext *main_context;
 static GMainLoop *main_loop;
 static GRand *delay_req_rand;
 static GstClock *observation_system_clock;
 static PtpClockIdentity ptp_clock_id = { GST_PTP_CLOCK_ID_NONE, 0 };
+
+#define CUR_STDIO_HEADER_SIZE (GST_READ_UINT16_BE (stdio_header))
+#define CUR_STDIO_HEADER_TYPE ((StdIOMessageType) stdio_header[2])
+
+#define CUR_STDERR_HEADER_SIZE (GST_READ_UINT16_BE (stderr_header))
 
 typedef struct
 {
@@ -343,6 +382,11 @@ static void emit_ptp_statistics (guint8 domain, const GstStructure * stats);
 static GHookList domain_stats_hooks;
 static gint domain_stats_n_hooks;
 static gboolean domain_stats_hooks_initted = FALSE;
+
+/* Only ever accessed from the PTP thread */
+/* PTPD in hybrid mode (default) sends multicast PTP messages with an invalid
+ * logMessageInterval. We work around this here and warn once */
+static gboolean ptpd_hybrid_workaround_warned_once = FALSE;
 
 /* Converts log2 seconds to GstClockTime */
 static GstClockTime
@@ -907,7 +951,17 @@ handle_announce_message (PtpMessage * msg, GstClockTime receive_time)
       return;
   }
 
-  sender->announce_interval = log2_to_clock_time (msg->log_message_interval);
+  if (msg->log_message_interval == 0x7f) {
+    sender->announce_interval = 2 * GST_SECOND;
+
+    if (!ptpd_hybrid_workaround_warned_once) {
+      GST_WARNING ("Working around ptpd bug: ptpd sends multicast PTP packets "
+          "with invalid logMessageInterval");
+      ptpd_hybrid_workaround_warned_once = TRUE;
+    }
+  } else {
+    sender->announce_interval = log2_to_clock_time (msg->log_message_interval);
+  }
 
   announce = g_new0 (PtpAnnounceMessage, 1);
   announce->receive_time = receive_time;
@@ -937,18 +991,21 @@ handle_announce_message (PtpMessage * msg, GstClockTime receive_time)
 static gboolean
 send_delay_req_timeout (PtpPendingSync * sync)
 {
-  StdIOHeader header = { 0, };
-  guint8 delay_req[44];
+  guint8 message[STDIO_MESSAGE_HEADER_SIZE + 8 + 44] = { 0, };
   GstByteWriter writer;
   gsize written;
   GError *err = NULL;
-
-  header.type = TYPE_EVENT;
-  header.size = 44;
+  GstClockTime send_time;
 
   GST_TRACE ("Sending delay_req to domain %u", sync->domain);
 
-  gst_byte_writer_init_with_data (&writer, delay_req, 44, FALSE);
+  sync->delay_req_send_time_local = send_time =
+      gst_clock_get_time (observation_system_clock);
+
+  gst_byte_writer_init_with_data (&writer, message, sizeof (message), FALSE);
+  gst_byte_writer_put_uint16_be_unchecked (&writer, 8 + 44);
+  gst_byte_writer_put_uint8_unchecked (&writer, TYPE_EVENT);
+  gst_byte_writer_put_uint64_be_unchecked (&writer, send_time);
   gst_byte_writer_put_uint8_unchecked (&writer, PTP_MESSAGE_TYPE_DELAY_REQ);
   gst_byte_writer_put_uint8_unchecked (&writer, 2);
   gst_byte_writer_put_uint16_be_unchecked (&writer, 44);
@@ -966,29 +1023,8 @@ send_delay_req_timeout (PtpPendingSync * sync)
   gst_byte_writer_put_uint64_be_unchecked (&writer, 0);
   gst_byte_writer_put_uint16_be_unchecked (&writer, 0);
 
-  if (!g_output_stream_write_all (stdin_pipe, &header, sizeof (StdIOHeader),
+  if (!g_output_stream_write_all (stdin_pipe, message, sizeof (message),
           &written, NULL, &err)) {
-    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CLOSED)
-        || g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED)) {
-      GST_ERROR ("Got EOF on stdout");
-    } else {
-      GST_ERROR ("Failed to write header to stdin: %s", err->message);
-    }
-
-    g_message ("EOF on stdout");
-    g_main_loop_quit (main_loop);
-    return G_SOURCE_REMOVE;
-  } else if (written != sizeof (StdIOHeader)) {
-    GST_ERROR ("Unexpected write size: %" G_GSIZE_FORMAT, written);
-    g_main_loop_quit (main_loop);
-    return G_SOURCE_REMOVE;
-  }
-
-  sync->delay_req_send_time_local =
-      gst_clock_get_time (observation_system_clock);
-
-  if (!g_output_stream_write_all (stdin_pipe, delay_req, 44, &written, NULL,
-          &err)) {
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CLOSED)
         || g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED)) {
       GST_ERROR ("Got EOF on stdout");
@@ -999,7 +1035,7 @@ send_delay_req_timeout (PtpPendingSync * sync)
     g_message ("EOF on stdout");
     g_main_loop_quit (main_loop);
     return G_SOURCE_REMOVE;
-  } else if (written != 44) {
+  } else if (written != sizeof (message)) {
     GST_ERROR ("Unexpected write size: %" G_GSIZE_FORMAT, written);
     g_main_loop_quit (main_loop);
     return G_SOURCE_REMOVE;
@@ -1501,7 +1537,17 @@ handle_sync_message (PtpMessage * msg, GstClockTime receive_time)
     return;
 #endif
 
-  domain->sync_interval = log2_to_clock_time (msg->log_message_interval);
+  if (msg->log_message_interval == 0x7f) {
+    domain->sync_interval = GST_SECOND;
+
+    if (!ptpd_hybrid_workaround_warned_once) {
+      GST_WARNING ("Working around ptpd bug: ptpd sends multicast PTP packets "
+          "with invalid logMessageInterval");
+      ptpd_hybrid_workaround_warned_once = TRUE;
+    }
+  } else {
+    domain->sync_interval = log2_to_clock_time (msg->log_message_interval);
+  }
 
   /* Check if duplicated */
   for (l = domain->pending_syncs.head; l; l = l->next) {
@@ -1669,6 +1715,13 @@ handle_delay_resp_message (PtpMessage * msg, GstClockTime receive_time)
   PtpDomainData *domain = NULL;
   PtpPendingSync *sync = NULL;
 
+  /* Not for us */
+  if (msg->message_specific.delay_resp.
+      requesting_port_identity.clock_identity != ptp_clock_id.clock_identity
+      || msg->message_specific.delay_resp.
+      requesting_port_identity.port_number != ptp_clock_id.port_number)
+    return;
+
   /* Don't consider messages with the alternate master flag set */
   if ((msg->flag_field & 0x0100))
     return;
@@ -1691,15 +1744,18 @@ handle_delay_resp_message (PtpMessage * msg, GstClockTime receive_time)
           &msg->source_port_identity) != 0)
     return;
 
-  /* Not for us */
-  if (msg->message_specific.delay_resp.
-      requesting_port_identity.clock_identity != ptp_clock_id.clock_identity
-      || msg->message_specific.delay_resp.
-      requesting_port_identity.port_number != ptp_clock_id.port_number)
-    return;
+  if (msg->log_message_interval == 0x7f) {
+    domain->min_delay_req_interval = GST_SECOND;
 
-  domain->min_delay_req_interval =
-      log2_to_clock_time (msg->log_message_interval);
+    if (!ptpd_hybrid_workaround_warned_once) {
+      GST_WARNING ("Working around ptpd bug: ptpd sends multicast PTP packets "
+          "with invalid logMessageInterval");
+      ptpd_hybrid_workaround_warned_once = TRUE;
+    }
+  } else {
+    domain->min_delay_req_interval =
+        log2_to_clock_time (msg->log_message_interval);
+  }
 
   /* Check if we know about this one */
   for (l = domain->pending_syncs.head; l; l = l->next) {
@@ -1782,6 +1838,74 @@ handle_ptp_message (PtpMessage * msg, GstClockTime receive_time)
   }
 }
 
+static void
+handle_send_time_ack (const guint8 * data, gsize size,
+    GstClockTime receive_time)
+{
+  GstByteReader breader;
+  GstClockTime helper_send_time;
+  guint8 message_type;
+  guint8 domain_number;
+  guint16 seqnum;
+  GList *l;
+  PtpDomainData *domain = NULL;
+  PtpPendingSync *sync = NULL;
+
+  gst_byte_reader_init (&breader, data, size);
+  helper_send_time = gst_byte_reader_get_uint64_be_unchecked (&breader);
+  message_type = gst_byte_reader_get_uint8_unchecked (&breader);
+  domain_number = gst_byte_reader_get_uint8_unchecked (&breader);
+  seqnum = gst_byte_reader_get_uint16_be_unchecked (&breader);
+
+  GST_TRACE
+      ("Received SEND_TIME_ACK for message type %d, domain number %d, seqnum %d with send time %"
+      GST_TIME_FORMAT " at receive_time %" GST_TIME_FORMAT, message_type,
+      domain_number, seqnum, GST_TIME_ARGS (helper_send_time),
+      GST_TIME_ARGS (receive_time));
+
+  if (message_type != PTP_MESSAGE_TYPE_DELAY_REQ)
+    return;
+
+  for (l = domain_data; l; l = l->next) {
+    PtpDomainData *tmp = l->data;
+
+    if (domain_number == tmp->domain) {
+      domain = tmp;
+      break;
+    }
+  }
+
+  if (!domain)
+    return;
+
+  /* Check if we know about this one */
+  for (l = domain->pending_syncs.head; l; l = l->next) {
+    PtpPendingSync *tmp = l->data;
+
+    if (tmp->delay_req_seqnum == seqnum) {
+      sync = tmp;
+      break;
+    }
+  }
+
+  if (!sync)
+    return;
+
+  /* Got a DELAY_RESP for this already */
+  if (sync->delay_req_recv_time_remote != GST_CLOCK_TIME_NONE)
+    return;
+
+  if (helper_send_time != 0) {
+    GST_TRACE ("DELAY_REQ message took %" GST_STIME_FORMAT
+        " to helper process, SEND_TIME_ACK took %" GST_STIME_FORMAT
+        " from helper process",
+        GST_STIME_ARGS ((GstClockTimeDiff) (helper_send_time -
+                sync->delay_req_send_time_local)),
+        GST_STIME_ARGS (receive_time - helper_send_time));
+    sync->delay_req_send_time_local = helper_send_time;
+  }
+}
+
 static void have_stdout_header (GInputStream * stdout_pipe, GAsyncResult * res,
     gpointer user_data);
 
@@ -1807,29 +1931,37 @@ have_stdout_body (GInputStream * stdout_pipe, GAsyncResult * res,
     GST_ERROR ("Got EOF on stdin");
     g_main_loop_quit (main_loop);
     return;
-  } else if (read != stdio_header.size) {
+  } else if (read != CUR_STDIO_HEADER_SIZE) {
     GST_ERROR ("Unexpected read size: %" G_GSIZE_FORMAT, read);
     g_main_loop_quit (main_loop);
     return;
   }
 
-  switch (stdio_header.type) {
+  switch (CUR_STDIO_HEADER_TYPE) {
     case TYPE_EVENT:
     case TYPE_GENERAL:{
       GstClockTime receive_time = gst_clock_get_time (observation_system_clock);
+      GstClockTime helper_receive_time;
       PtpMessage msg;
 
-      if (parse_ptp_message (&msg, (const guint8 *) stdout_buffer,
-              stdio_header.size)) {
+      helper_receive_time = GST_READ_UINT64_BE (stdout_buffer);
+
+      if (parse_ptp_message (&msg, (const guint8 *) stdout_buffer + 8,
+              CUR_STDIO_HEADER_SIZE)) {
         dump_ptp_message (&msg);
+        if (helper_receive_time != 0) {
+          GST_TRACE ("Message took %" GST_STIME_FORMAT " from helper process",
+              GST_STIME_ARGS ((GstClockTimeDiff) (receive_time -
+                      helper_receive_time)));
+          receive_time = helper_receive_time;
+        }
         handle_ptp_message (&msg, receive_time);
       }
       break;
     }
-    default:
     case TYPE_CLOCK_ID:{
-      if (stdio_header.size != 8) {
-        GST_ERROR ("Unexpected clock id size (%u != 8)", stdio_header.size);
+      if (CUR_STDIO_HEADER_SIZE != 8) {
+        GST_ERROR ("Unexpected clock id size (%u != 8)", CUR_STDIO_HEADER_SIZE);
         g_main_loop_quit (main_loop);
         return;
       }
@@ -1846,12 +1978,27 @@ have_stdout_body (GInputStream * stdout_pipe, GAsyncResult * res,
       g_mutex_unlock (&ptp_lock);
       break;
     }
+    case TYPE_SEND_TIME_ACK:{
+      GstClockTime receive_time = gst_clock_get_time (observation_system_clock);
+
+      if (CUR_STDIO_HEADER_SIZE != 12) {
+        GST_ERROR ("Unexpected send time ack size (%u != 12)",
+            CUR_STDIO_HEADER_SIZE);
+        g_main_loop_quit (main_loop);
+        return;
+      }
+
+      handle_send_time_ack (stdout_buffer, CUR_STDIO_HEADER_SIZE, receive_time);
+      break;
+    }
+    default:
+      break;
   }
 
   /* And read the next header */
-  memset (&stdio_header, 0, sizeof (StdIOHeader));
-  g_input_stream_read_all_async (stdout_pipe, &stdio_header,
-      sizeof (StdIOHeader), G_PRIORITY_DEFAULT, NULL,
+  memset (&stdio_header, 0, STDIO_MESSAGE_HEADER_SIZE);
+  g_input_stream_read_all_async (stdout_pipe, stdio_header,
+      STDIO_MESSAGE_HEADER_SIZE, G_PRIORITY_DEFAULT, NULL,
       (GAsyncReadyCallback) have_stdout_header, NULL);
 }
 
@@ -1875,21 +2022,158 @@ have_stdout_header (GInputStream * stdout_pipe, GAsyncResult * res,
     return;
   } else if (read == 0) {
     GST_ERROR ("Got EOF on stdin");
-    g_main_loop_quit (main_loop);
     return;
-  } else if (read != sizeof (StdIOHeader)) {
+  } else if (read != STDIO_MESSAGE_HEADER_SIZE) {
     GST_ERROR ("Unexpected read size: %" G_GSIZE_FORMAT, read);
     g_main_loop_quit (main_loop);
     return;
-  } else if (stdio_header.size > 8192) {
-    GST_ERROR ("Unexpected size: %u", stdio_header.size);
+  } else if (CUR_STDIO_HEADER_SIZE > 8192) {
+    GST_ERROR ("Unexpected size: %u", CUR_STDIO_HEADER_SIZE);
     g_main_loop_quit (main_loop);
     return;
   }
 
   /* And now read the body */
-  g_input_stream_read_all_async (stdout_pipe, stdout_buffer, stdio_header.size,
-      G_PRIORITY_DEFAULT, NULL, (GAsyncReadyCallback) have_stdout_body, NULL);
+  g_input_stream_read_all_async (stdout_pipe, stdout_buffer,
+      CUR_STDIO_HEADER_SIZE, G_PRIORITY_DEFAULT, NULL,
+      (GAsyncReadyCallback) have_stdout_body, NULL);
+}
+
+static void have_stderr_header (GInputStream * stderr_pipe, GAsyncResult * res,
+    gpointer user_data);
+
+static void
+have_stderr_body (GInputStream * stderr_pipe, GAsyncResult * res,
+    gpointer user_data)
+{
+  GError *err = NULL;
+  gsize read;
+#ifndef GST_DISABLE_GST_DEBUG
+  GstByteReader breader;
+  GstDebugLevel level;
+  guint16 filename_length;
+  gchar *filename = NULL;
+  guint16 module_path_length;
+  gchar *module_path = NULL;
+  guint32 line_number;
+  gchar *message = NULL;
+  guint16 message_length;
+  guint8 b;
+#endif
+
+  /* Finish reading the body */
+  if (!g_input_stream_read_all_finish (stderr_pipe, res, &read, &err)) {
+    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CLOSED) ||
+        g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED)) {
+      GST_ERROR ("Got EOF on stderr");
+    } else {
+      GST_ERROR ("Failed to read header from stderr: %s", err->message);
+    }
+    g_clear_error (&err);
+    g_main_loop_quit (main_loop);
+    return;
+  } else if (read == 0) {
+    GST_ERROR ("Got EOF on stderr");
+    g_main_loop_quit (main_loop);
+    return;
+  } else if (read != CUR_STDERR_HEADER_SIZE) {
+    GST_ERROR ("Unexpected read size: %" G_GSIZE_FORMAT, read);
+    g_main_loop_quit (main_loop);
+    return;
+  }
+
+#ifndef GST_DISABLE_GST_DEBUG
+  gst_byte_reader_init (&breader, stderr_buffer, CUR_STDERR_HEADER_SIZE);
+
+  if (!gst_byte_reader_get_uint8 (&breader, &b) || b > GST_LEVEL_MAX)
+    goto err;
+  level = (GstDebugLevel) b;
+  if (!gst_byte_reader_get_uint16_be (&breader, &filename_length)
+      || filename_length > gst_byte_reader_get_remaining (&breader))
+    goto err;
+  filename =
+      g_strndup ((const gchar *) gst_byte_reader_get_data_unchecked (&breader,
+          filename_length), filename_length);
+
+  if (!gst_byte_reader_get_uint16_be (&breader, &module_path_length)
+      || module_path_length > gst_byte_reader_get_remaining (&breader))
+    goto err;
+  module_path =
+      g_strndup ((const gchar *) gst_byte_reader_get_data_unchecked (&breader,
+          module_path_length), module_path_length);
+
+  if (!gst_byte_reader_get_uint32_be (&breader, &line_number))
+    goto err;
+
+  message_length = gst_byte_reader_get_remaining (&breader);
+  message =
+      g_strndup ((const gchar *) gst_byte_reader_get_data_unchecked (&breader,
+          message_length), message_length);
+
+  gst_debug_log_literal (GST_CAT_DEFAULT, level, filename, module_path,
+      line_number, NULL, message);
+
+  g_clear_pointer (&filename, g_free);
+  g_clear_pointer (&module_path, g_free);
+  g_clear_pointer (&message, g_free);
+#endif
+
+  /* And read the next header */
+  memset (&stderr_header, 0, STDERR_MESSAGE_HEADER_SIZE);
+  g_input_stream_read_all_async (stderr_pipe, stderr_header,
+      STDERR_MESSAGE_HEADER_SIZE, G_PRIORITY_DEFAULT, NULL,
+      (GAsyncReadyCallback) have_stderr_header, NULL);
+  return;
+
+#ifndef GST_DISABLE_GST_DEBUG
+err:
+  {
+    GST_ERROR ("Unexpected stderr data");
+    g_clear_pointer (&filename, g_free);
+    g_clear_pointer (&module_path, g_free);
+    g_clear_pointer (&message, g_free);
+    g_main_loop_quit (main_loop);
+    return;
+  }
+#endif
+}
+
+static void
+have_stderr_header (GInputStream * stderr_pipe, GAsyncResult * res,
+    gpointer user_data)
+{
+  GError *err = NULL;
+  gsize read;
+
+  /* Finish reading the header */
+  if (!g_input_stream_read_all_finish (stderr_pipe, res, &read, &err)) {
+    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CLOSED) ||
+        g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED)) {
+      GST_ERROR ("Got EOF on stderr");
+    } else {
+      GST_ERROR ("Failed to read header from stderr: %s", err->message);
+    }
+    g_clear_error (&err);
+    g_main_loop_quit (main_loop);
+    return;
+  } else if (read == 0) {
+    GST_ERROR ("Got EOF on stderr");
+    g_main_loop_quit (main_loop);
+    return;
+  } else if (read != STDERR_MESSAGE_HEADER_SIZE) {
+    GST_ERROR ("Unexpected read size: %" G_GSIZE_FORMAT, read);
+    g_main_loop_quit (main_loop);
+    return;
+  } else if (CUR_STDERR_HEADER_SIZE > 8192 || CUR_STDERR_HEADER_SIZE < 9) {
+    GST_ERROR ("Unexpected size: %u", CUR_STDERR_HEADER_SIZE);
+    g_main_loop_quit (main_loop);
+    return;
+  }
+
+  /* And now read the body */
+  g_input_stream_read_all_async (stderr_pipe, stderr_buffer,
+      CUR_STDERR_HEADER_SIZE, G_PRIORITY_DEFAULT, NULL,
+      (GAsyncReadyCallback) have_stderr_body, NULL);
 }
 
 /* Cleanup all announce messages and announce message senders
@@ -1991,10 +2275,15 @@ ptp_helper_main (gpointer data)
 
   g_main_context_push_thread_default (main_context);
 
-  memset (&stdio_header, 0, sizeof (StdIOHeader));
-  g_input_stream_read_all_async (stdout_pipe, &stdio_header,
-      sizeof (StdIOHeader), G_PRIORITY_DEFAULT, NULL,
+  memset (&stdio_header, 0, STDIO_MESSAGE_HEADER_SIZE);
+  g_input_stream_read_all_async (stdout_pipe, stdio_header,
+      STDIO_MESSAGE_HEADER_SIZE, G_PRIORITY_DEFAULT, NULL,
       (GAsyncReadyCallback) have_stdout_header, NULL);
+
+  memset (&stderr_header, 0, STDERR_MESSAGE_HEADER_SIZE);
+  g_input_stream_read_all_async (stderr_pipe, stderr_header,
+      STDERR_MESSAGE_HEADER_SIZE, G_PRIORITY_DEFAULT, NULL,
+      (GAsyncReadyCallback) have_stderr_header, NULL);
 
   /* Check all 5 seconds, if we have to cleanup ANNOUNCE or pending syncs message */
   cleanup_source = g_timeout_source_new_seconds (5);
@@ -2049,6 +2338,146 @@ gst_ptp_is_initialized (void)
 {
   return initted;
 }
+
+#if defined(G_OS_WIN32) && !defined(GST_STATIC_COMPILATION)
+/* Note: DllMain is only called when DLLs are loaded or unloaded, so this will
+ * never be called if libgstnet-1.0 is linked statically. Do not add any code
+ * here to, say, initialize variables or set things up since that will only
+ * happen for dynamically-built GStreamer.
+ */
+BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
+BOOL WINAPI
+DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+{
+  if (fdwReason == DLL_PROCESS_ATTACH)
+    gstnet_dll_handle = (HMODULE) hinstDLL;
+  return TRUE;
+}
+
+#endif
+
+static char *
+get_relocated_libgstnet (void)
+{
+  char *dir = NULL;
+
+#ifdef G_OS_WIN32
+  {
+    char *base_dir;
+
+    GST_DEBUG ("attempting to retrieve libgstnet-1.0 location using "
+        "Win32-specific method");
+
+    base_dir =
+        g_win32_get_package_installation_directory_of_module
+        (gstnet_dll_handle);
+    if (!base_dir)
+      return NULL;
+
+    dir = g_build_filename (base_dir, GST_PLUGIN_SUBDIR, NULL);
+    GST_DEBUG ("using DLL dir %s", dir);
+
+    g_free (base_dir);
+  }
+#elif defined(HAVE_DLADDR)
+  {
+    Dl_info info;
+
+    GST_DEBUG ("attempting to retrieve libgstnet-1.0 location using "
+        "dladdr()");
+
+    if (dladdr (&gst_ptp_init, &info)) {
+      GST_LOG ("dli_fname: %s", info.dli_fname);
+
+      if (!info.dli_fname) {
+        return NULL;
+      }
+
+      dir = g_path_get_dirname (info.dli_fname);
+    } else {
+      GST_LOG ("dladdr() failed");
+      return NULL;
+    }
+  }
+#else
+#warning "Unsupported platform for retrieving the current location of a shared library."
+#warning "Relocatable builds will not work."
+  GST_WARNING ("Don't know how to retrieve the location of the shared "
+      "library libgstnet-" GST_API_VERSION);
+#endif
+
+  return dir;
+}
+
+static int
+count_directories (const char *filepath)
+{
+  int i = 0;
+  char *tmp;
+  gsize len;
+
+  g_return_val_if_fail (!g_path_is_absolute (filepath), 0);
+
+  tmp = g_strdup (filepath);
+  len = strlen (tmp);
+
+  /* ignore UNC share paths entirely */
+  if (len >= 3 && G_IS_DIR_SEPARATOR (tmp[0]) && G_IS_DIR_SEPARATOR (tmp[1])
+      && !G_IS_DIR_SEPARATOR (tmp[2])) {
+    GST_WARNING ("found a UNC share path, ignoring");
+    g_clear_pointer (&tmp, g_free);
+    return 0;
+  }
+
+  /* remove trailing slashes if they exist */
+  while (
+      /* don't remove the trailing slash for C:\.
+       * UNC paths are at least \\s\s */
+      len > 3 && G_IS_DIR_SEPARATOR (tmp[len - 1])) {
+    tmp[len - 1] = '\0';
+    len--;
+  }
+
+  while (tmp) {
+    char *dirname, *basename;
+    len = strlen (tmp);
+
+    if (g_strcmp0 (tmp, ".") == 0)
+      break;
+    if (g_strcmp0 (tmp, "/") == 0)
+      break;
+
+    /* g_path_get_dirname() may return something of the form 'C:.', where C is
+     * a drive letter */
+    if (len == 3 && g_ascii_isalpha (tmp[0]) && tmp[1] == ':' && tmp[2] == '.')
+      break;
+
+    basename = g_path_get_basename (tmp);
+    dirname = g_path_get_dirname (tmp);
+
+    if (g_strcmp0 (basename, "..") == 0) {
+      i--;
+    } else if (g_strcmp0 (basename, ".") == 0) {
+      /* nothing to do */
+    } else {
+      i++;
+    }
+
+    g_clear_pointer (&basename, g_free);
+    g_clear_pointer (&tmp, g_free);
+    tmp = dirname;
+  }
+
+  g_clear_pointer (&tmp, g_free);
+
+  if (i < 0) {
+    g_critical ("path counting resulted in a negative directory count!");
+    return 0;
+  }
+
+  return i;
+}
+
 
 /**
  * gst_ptp_init:
@@ -2109,17 +2538,65 @@ gst_ptp_init (guint64 clock_id, gchar ** interfaces)
   if (interfaces != NULL)
     argc += 2 * g_strv_length (interfaces);
 
-  argv = g_new0 (gchar *, argc + 2);
+  argv = g_new0 (gchar *, argc + 3);
   argc_c = 0;
 
+  /* Find the gst-ptp-helper */
   env = g_getenv ("GST_PTP_HELPER_1_0");
-  if (env == NULL)
+  if (!env)
     env = g_getenv ("GST_PTP_HELPER");
-  if (env != NULL && *env != '\0') {
+
+  if (env && *env != '\0') {
+    /* use the env-var if it is set */
     argv[argc_c++] = g_strdup (env);
   } else {
-    argv[argc_c++] = g_strdup (GST_PTP_HELPER_INSTALLED);
+    char *relocated_libgstnet;
+
+    /* use the installed version */
+    GST_LOG ("Trying installed PTP helper process");
+
+#define MAX_PATH_DEPTH 64
+
+    relocated_libgstnet = get_relocated_libgstnet ();
+    if (relocated_libgstnet) {
+      int plugin_subdir_depth = count_directories (GST_PLUGIN_SUBDIR);
+
+      GST_DEBUG ("found libgstnet-" GST_API_VERSION " library "
+          "at %s", relocated_libgstnet);
+
+      if (plugin_subdir_depth < MAX_PATH_DEPTH) {
+        const char *filenamev[MAX_PATH_DEPTH + 5];
+        int i = 0, j;
+
+        filenamev[i++] = relocated_libgstnet;
+        for (j = 0; j < plugin_subdir_depth; j++)
+          filenamev[i++] = "..";
+        filenamev[i++] = GST_PTP_HELPER_SUBDIR;
+        filenamev[i++] = "gstreamer-" GST_API_VERSION;
+#ifdef G_OS_WIN32
+        filenamev[i++] = "gst-ptp-helper.exe";
+#else
+        filenamev[i++] = "gst-ptp-helper";
+#endif
+        filenamev[i++] = NULL;
+        g_assert (i <= MAX_PATH_DEPTH + 5);
+
+        GST_DEBUG ("constructing path to system PTP helper using "
+            "plugin dir: \'%s\', PTP helper dir: \'%s\'",
+            GST_PLUGIN_SUBDIR, GST_PTP_HELPER_SUBDIR);
+
+        argv[argc_c++] = g_build_filenamev ((char **) filenamev);
+      } else {
+        GST_WARNING ("GST_PLUGIN_SUBDIR: \'%s\' has too many path segments",
+            GST_PLUGIN_SUBDIR);
+        argv[argc_c++] = g_strdup (GST_PTP_HELPER_INSTALLED);
+      }
+    } else {
+      argv[argc_c++] = g_strdup (GST_PTP_HELPER_INSTALLED);
+    }
   }
+
+#undef MAX_PATH_DEPTH
 
   GST_LOG ("Using PTP helper process: %s", argv[argc_c - 1]);
 
@@ -2140,9 +2617,16 @@ gst_ptp_init (guint64 clock_id, gchar ** interfaces)
     }
   }
 
+  /* Check if the helper process should be verbose */
+  env = g_getenv ("GST_PTP_HELPER_VERBOSE");
+  if (env && g_ascii_strcasecmp (env, "no") != 0) {
+    argv[argc_c++] = g_strdup ("-v");
+  }
+
   ptp_helper_process =
       g_subprocess_newv ((const gchar * const *) argv,
-      G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE, &err);
+      G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+      G_SUBPROCESS_FLAGS_STDERR_PIPE, &err);
   if (!ptp_helper_process) {
     GST_ERROR ("Failed to start ptp helper process: %s", err->message);
     g_clear_error (&err);
@@ -2157,7 +2641,10 @@ gst_ptp_init (guint64 clock_id, gchar ** interfaces)
   stdout_pipe = g_subprocess_get_stdout_pipe (ptp_helper_process);
   if (stdout_pipe)
     g_object_ref (stdout_pipe);
-  if (!stdin_pipe || !stdout_pipe) {
+  stderr_pipe = g_subprocess_get_stderr_pipe (ptp_helper_process);
+  if (stderr_pipe)
+    g_object_ref (stderr_pipe);
+  if (!stdin_pipe || !stdout_pipe || !stderr_pipe) {
     GST_ERROR ("Failed to get ptp helper process pipes");
     ret = FALSE;
     supported = FALSE;
@@ -2206,6 +2693,7 @@ done:
     if (ptp_helper_process) {
       g_clear_object (&stdin_pipe);
       g_clear_object (&stdout_pipe);
+      g_clear_object (&stderr_pipe);
       g_subprocess_force_exit (ptp_helper_process);
       g_clear_object (&ptp_helper_process);
     }
@@ -2255,6 +2743,7 @@ gst_ptp_deinit (void)
   if (ptp_helper_process) {
     g_clear_object (&stdin_pipe);
     g_clear_object (&stdout_pipe);
+    g_clear_object (&stderr_pipe);
     g_subprocess_force_exit (ptp_helper_process);
     g_clear_object (&ptp_helper_process);
   }

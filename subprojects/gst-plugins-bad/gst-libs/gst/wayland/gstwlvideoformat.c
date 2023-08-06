@@ -48,7 +48,7 @@ gst_wl_videoformat_init_once (void)
 typedef struct
 {
   enum wl_shm_format wl_shm_format;
-  guint dma_format;
+  guint32 dma_format;
   GstVideoFormat gst_format;
 } wl_VideoFormat;
 
@@ -96,7 +96,7 @@ gst_video_format_to_wl_shm_format (GstVideoFormat format)
   return -1;
 }
 
-gint
+guint32
 gst_video_format_to_wl_dmabuf_format (GstVideoFormat format)
 {
   guint i;
@@ -106,7 +106,7 @@ gst_video_format_to_wl_dmabuf_format (GstVideoFormat format)
       return wl_formats[i].dma_format;
 
   GST_WARNING ("wayland dmabuf video format not found");
-  return -1;
+  return 0;
 }
 
 GstVideoFormat
@@ -140,9 +140,11 @@ gst_wl_shm_format_to_string (enum wl_shm_format wl_format)
       (gst_wl_shm_format_to_video_format (wl_format));
 }
 
-const gchar *
-gst_wl_dmabuf_format_to_string (guint wl_format)
+gchar *
+gst_wl_dmabuf_format_to_string (guint wl_format, guint64 modifier)
 {
-  return gst_video_format_to_string
-      (gst_wl_dmabuf_format_to_video_format (wl_format));
+  GstVideoFormat gst_format = gst_wl_dmabuf_format_to_video_format (wl_format);
+  const guint32 fourcc = gst_video_dma_drm_fourcc_from_format (gst_format);
+
+  return gst_video_dma_drm_fourcc_to_string (fourcc, modifier);
 }

@@ -926,16 +926,16 @@ extract_608_field_from_s334_1a (const guint8 * ccdata, gsize ccdata_size,
   /* Iterate over the ccdata and put the corresponding tuples for the given field
    * in the storage */
   for (i = 0; i < ccdata_size; i += 3) {
-    if ((field == 1 && (ccdata[i * 3] & 0x80)) ||
-        (field == 2 && !(ccdata[i * 3] & 0x80))) {
+    if ((field == 1 && (ccdata[i] & 0x80)) ||
+        (field == 2 && !(ccdata[i] & 0x80))) {
       GST_DEBUG ("Storing matching cc for field %d : 0x%02x 0x%02x", field,
-          ccdata[i * 3 + 1], ccdata[i * 3 + 2]);
+          ccdata[i + 1], ccdata[i + 2]);
       if (res_size >= storage_size) {
         storage_size += 128;
         storage = g_realloc (storage, storage_size);
       }
-      storage[res_size] = ccdata[i * 3 + 1];
-      storage[res_size + 1] = ccdata[i * 3 + 2];
+      storage[res_size] = ccdata[i + 1];
+      storage[res_size + 1] = ccdata[i + 2];
       res_size += 2;
     }
   }
@@ -5793,15 +5793,17 @@ static gboolean
 gst_qt_mux_can_renegotiate (GstQTMux * qtmux, GstPad * pad, GstCaps * caps)
 {
   GstQTMuxPad *qtmuxpad = GST_QT_MUX_PAD_CAST (pad);
+  gboolean ret = TRUE;
 
   /* does not go well to renegotiate stream mid-way, unless
    * the old caps are a subset of the new one (this means upstream
    * added more info to the caps, as both should be 'fixed' caps) */
 
+  GST_OBJECT_LOCK (qtmux);
   if (!qtmuxpad->configured_caps) {
     GST_DEBUG_OBJECT (qtmux, "pad %s accepted caps %" GST_PTR_FORMAT,
         GST_PAD_NAME (pad), caps);
-    return TRUE;
+    goto out;
   }
 
   g_assert (caps != NULL);
@@ -5810,14 +5812,18 @@ gst_qt_mux_can_renegotiate (GstQTMux * qtmux, GstPad * pad, GstCaps * caps)
     GST_WARNING_OBJECT (qtmux,
         "pad %s refused renegotiation to %" GST_PTR_FORMAT " from %"
         GST_PTR_FORMAT, GST_PAD_NAME (pad), caps, qtmuxpad->configured_caps);
-    return FALSE;
+    ret = FALSE;
+    goto out;
   }
 
   GST_DEBUG_OBJECT (qtmux,
       "pad %s accepted renegotiation to %" GST_PTR_FORMAT " from %"
       GST_PTR_FORMAT, GST_PAD_NAME (pad), caps, qtmuxpad->configured_caps);
 
-  return TRUE;
+out:
+  GST_OBJECT_UNLOCK (qtmux);
+
+  return ret;
 }
 
 static gboolean
@@ -6081,9 +6087,9 @@ gst_qt_mux_audio_sink_set_caps (GstQTMuxPad * qtpad, GstCaps * caps)
   } else if (strcmp (mimetype, "audio/x-ac3") == 0) {
     entry.fourcc = FOURCC_ac_3;
 
-    /* Fixed values according to TS 102 366 but it also mentions that
-     * they should be ignored */
-    entry.channels = 2;
+    /* TS 102 366 mentions that these fields should be ignored,
+     * but be friendly and fill in the channel count like FFmpeg does */
+    entry.channels = channels;
     entry.sample_size = 16;
 
     /* AC-3 needs an extension atom but its data can only be obtained from
@@ -7038,8 +7044,10 @@ gst_qt_mux_sink_event (GstAggregator * agg, GstAggregatorPad * agg_pad,
         GST_OBJECT_UNLOCK (qtmux);
       }
 
+      GST_OBJECT_LOCK (qtmux);
       if (ret)
         gst_caps_replace (&qtmux_pad->configured_caps, caps);
+      GST_OBJECT_UNLOCK (qtmux);
 
       gst_event_unref (event);
       event = NULL;

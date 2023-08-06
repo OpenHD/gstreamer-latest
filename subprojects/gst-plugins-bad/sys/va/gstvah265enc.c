@@ -56,6 +56,7 @@
 #include "gstvacaps.h"
 #include "gstvaprofile.h"
 #include "gstvadisplay_priv.h"
+#include "gstvapluginutils.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_va_h265enc_debug);
 #define GST_CAT_DEFAULT gst_va_h265enc_debug
@@ -448,7 +449,7 @@ gst_va_h265_enc_frame_new (void)
 {
   GstVaH265EncFrame *frame;
 
-  frame = g_slice_new (GstVaH265EncFrame);
+  frame = g_new (GstVaH265EncFrame, 1);
   frame->last_frame = FALSE;
   frame->picture = NULL;
   frame->total_frame_count = 0;
@@ -461,7 +462,7 @@ gst_va_h265_enc_frame_free (gpointer pframe)
 {
   GstVaH265EncFrame *frame = pframe;
   g_clear_pointer (&frame->picture, gst_va_encode_picture_free);
-  g_slice_free (GstVaH265EncFrame, frame);
+  g_free (frame);
 }
 
 static inline GstVaH265EncFrame *
@@ -486,10 +487,7 @@ _is_scc_enabled (GstVaH265Enc * self)
   if (base->profile == VAProfileHEVCSccMain
       || base->profile == VAProfileHEVCSccMain10
       || base->profile == VAProfileHEVCSccMain444
-#if VA_CHECK_VERSION(1, 8, 0)
-      || base->profile == VAProfileHEVCSccMain444_10
-#endif
-      )
+      || base->profile == VAProfileHEVCSccMain444_10)
     return TRUE;
 
   return FALSE;
@@ -538,7 +536,7 @@ _h265_fill_ptl (GstVaH265Enc * self,
     .profile_space = 0,
     .tier_flag = sequence->general_tier_flag,
     .profile_idc = sequence->general_profile_idc,
-    .profile_compatibility_flag = { },
+    .profile_compatibility_flag = { 0, },
     .progressive_source_flag = 1,
     .interlaced_source_flag = 0,
     .non_packed_constraint_flag = 0,
@@ -685,7 +683,6 @@ _h265_fill_ptl (GstVaH265Enc * self,
         ptl->one_picture_only_constraint_flag = 0;
         ptl->lower_bit_rate_constraint_flag = 1;
         break;
-#if VA_CHECK_VERSION(1, 8, 0)
       case VAProfileHEVCSccMain444_10:
         ptl->max_14bit_constraint_flag = 1;
         ptl->max_12bit_constraint_flag = 1;
@@ -698,7 +695,6 @@ _h265_fill_ptl (GstVaH265Enc * self,
         ptl->one_picture_only_constraint_flag = 0;
         ptl->lower_bit_rate_constraint_flag = 1;
         break;
-#endif
       default:
         GST_WARNING_OBJECT (self, "do not support the profile: %s of screen"
             " content coding extensions.", gst_va_profile_name (base->profile));
@@ -892,7 +888,6 @@ _h265_fill_sps (GstVaH265Enc * self,
     .sps_3d_extension_flag = 0,
     .sps_scc_extension_flag = _is_scc_enabled (self),
     /* if sps_scc_extension_flag */
-#if VA_CHECK_VERSION(1, 8, 0)
     .sps_scc_extension_params = {
       .sps_curr_pic_ref_enabled_flag = 1,
       .palette_mode_enabled_flag =
@@ -901,11 +896,10 @@ _h265_fill_sps (GstVaH265Enc * self,
       .delta_palette_max_predictor_size = 32,
       .sps_palette_predictor_initializers_present_flag = 0,
       .sps_num_palette_predictor_initializer_minus1 = 0,
-      .sps_palette_predictor_initializer = { },
+      .sps_palette_predictor_initializer = {{ 0, }},
       .motion_vector_resolution_control_idc = 0,
       .intra_boundary_filtering_disabled_flag = 0,
     },
-#endif
   };
   /* *INDENT-ON* */
 
@@ -983,14 +977,12 @@ _h265_fill_pps (GstVaH265Enc * self,
     .pps_3d_extension_flag = 0,
     .pps_scc_extension_flag = _is_scc_enabled (self),
     /* if pps_scc_extension_flag*/
-#if VA_CHECK_VERSION(1, 8, 0)
     .pps_scc_extension_params = {
       .pps_curr_pic_ref_enabled_flag =
           pic_param->scc_fields.bits.pps_curr_pic_ref_enabled_flag,
       .residual_adaptive_colour_transform_enabled_flag = 0,
       .pps_palette_predictor_initializers_present_flag = 0,
     },
-#endif
   };
   /* *INDENT-ON* */
 }
@@ -1050,7 +1042,7 @@ _h265_fill_slice_header (GstVaH265Enc * self, GstVaH265EncFrame * frame,
     .collocated_ref_idx = (slice_param->slice_type == GST_H265_I_SLICE ?
         0xFF : self->features.collocated_ref_idx),
     /* not used now. */
-    .pred_weight_table = { },
+    .pred_weight_table = { 0, },
     .five_minus_max_num_merge_cand = 5 - slice_param->max_num_merge_cand,
     .use_integer_mv_flag = 0,
     .qp_delta = slice_param->slice_qp_delta,
@@ -1261,7 +1253,7 @@ static gboolean
 _h265_add_aud (GstVaH265Enc * self, GstVaH265EncFrame * frame)
 {
   GstVaBaseEnc *base = GST_VA_BASE_ENC (self);
-  guint8 aud_data[8] = { };
+  guint8 aud_data[8] = { 0, };
   guint size;
   guint8 pic_type = 0;
 
@@ -1354,9 +1346,7 @@ _h265_fill_sequence_parameter (GstVaH265Enc * self,
     case VAProfileHEVCSccMain:
     case VAProfileHEVCSccMain10:
     case VAProfileHEVCSccMain444:
-#if VA_CHECK_VERSION(1, 8, 0)
     case VAProfileHEVCSccMain444_10:
-#endif
       profile_idc = GST_H265_PROFILE_IDC_SCREEN_CONTENT_CODING;
       break;
     default:
@@ -1430,9 +1420,7 @@ _h265_fill_sequence_parameter (GstVaH265Enc * self,
     /* if (vui_fields.bits.vui_timing_info_present_flag) */
     .vui_num_units_in_tick = GST_VIDEO_INFO_FPS_D (&base->input_state->info),
     .vui_time_scale = GST_VIDEO_INFO_FPS_N (&base->input_state->info),
-#if VA_CHECK_VERSION(1, 8, 0)
     .scc_fields.bits.palette_mode_enabled_flag = _is_scc_enabled (self),
-#endif
   };
   /* *INDENT-ON* */
 
@@ -1552,10 +1540,8 @@ _h265_fill_picture_parameter (GstVaH265Enc * self, GstVaH265EncFrame * frame,
     },
     /* We use coding_type here, set this to 0. */
     .hierarchical_level_plus1 = hierarchical_level_plus1,
-#if VA_CHECK_VERSION(1, 8, 0)
     .scc_fields.bits.pps_curr_pic_ref_enabled_flag =
         _is_scc_enabled (self),
-#endif
   };
   /* *INDENT-ON* */
 
@@ -1692,12 +1678,12 @@ _h265_fill_slice_parameter (GstVaH265Enc * self, GstVaH265EncFrame * frame,
     .delta_chroma_log2_weight_denom = 0,
     .delta_luma_weight_l0 = { 0, },
     .luma_offset_l0 = { 0, },
-    .delta_chroma_weight_l0 = { },
-    .chroma_offset_l0 = { },
-    .delta_luma_weight_l1 = { },
-    .luma_offset_l1 = { },
-    .delta_chroma_weight_l1 = { },
-    .chroma_offset_l1 = { },
+    .delta_chroma_weight_l0 = {{ 0, }},
+    .chroma_offset_l0 = {{ 0, }},
+    .delta_luma_weight_l1 = { 0, },
+    .luma_offset_l1 = { 0, },
+    .delta_chroma_weight_l1 = {{ 0, }},
+    .chroma_offset_l1 = {{ 0, }},
 
     .max_num_merge_cand = 5,
     .slice_qp_delta = slice_qp_delta,
@@ -1726,10 +1712,8 @@ _h265_fill_slice_parameter (GstVaH265Enc * self, GstVaH265EncFrame * frame,
       .collocated_from_l0_flag = (frame_type == GST_H265_I_SLICE ?
           0 : self->features.collocated_from_l0_flag),
     },
-#if VA_CHECK_VERSION(1, 10, 0)
     .pred_weight_table_bit_offset = 0,
     .pred_weight_table_bit_length = 0,
-#endif
   };
   /* *INDENT-ON* */
 
@@ -1878,9 +1862,9 @@ _h265_encode_one_frame (GstVaH265Enc * self, GstVideoCodecFrame * gst_frame)
   guint list_forward_num = 0;
   GstVaH265EncFrame *list_backward[16] = { NULL, };
   guint list_backward_num = 0;
-  gint negative_pocs[16] = { };
+  gint negative_pocs[16] = { 0, };
   guint num_negative_pics = 0;
-  gint positive_pocs[16] = { };
+  gint positive_pocs[16] = { 0, };
   guint num_positive_pics = 0;
   gint collocated_poc = -1;
   gint i;
@@ -2631,15 +2615,6 @@ _h265_decide_profile (GstVaH265Enc * self, VAProfile * _profile,
   GArray *caps_candidates = NULL;
   GArray *chroma_candidates = NULL;
   guint depth = 0, chrome = 0;
-  gboolean support_scc = TRUE;
-
-  /* We do not have scc_fields defined in sequence and picture
-     before 1.8.0, just disable scc all. */
-#if VA_CHECK_VERSION(1, 8, 0)
-  support_scc = TRUE;
-#else
-  support_scc = FALSE;
-#endif
 
   caps_candidates = g_array_new (TRUE, TRUE, sizeof (VAProfile));
   chroma_candidates = g_array_new (TRUE, TRUE, sizeof (VAProfile));
@@ -2705,19 +2680,15 @@ _h265_decide_profile (GstVaH265Enc * self, VAProfile * _profile,
     if (depth == 8) {
       profile = VAProfileHEVCMain444;
       g_array_append_val (chroma_candidates, profile);
-      if (support_scc) {
-        profile = VAProfileHEVCSccMain444;
-        g_array_append_val (chroma_candidates, profile);
-      }
+      profile = VAProfileHEVCSccMain444;
+      g_array_append_val (chroma_candidates, profile);
     }
 
     if (depth <= 10) {
       profile = VAProfileHEVCMain444_10;
       g_array_append_val (chroma_candidates, profile);
-#if VA_CHECK_VERSION(1, 8, 0)
       profile = VAProfileHEVCSccMain444_10;
       g_array_append_val (chroma_candidates, profile);
-#endif
     }
 
     if (depth <= 12) {
@@ -2740,19 +2711,15 @@ _h265_decide_profile (GstVaH265Enc * self, VAProfile * _profile,
     if (depth == 8) {
       profile = VAProfileHEVCMain;
       g_array_append_val (chroma_candidates, profile);
-      if (support_scc) {
-        profile = VAProfileHEVCSccMain;
-        g_array_append_val (chroma_candidates, profile);
-      }
+      profile = VAProfileHEVCSccMain;
+      g_array_append_val (chroma_candidates, profile);
     }
 
     if (depth <= 10) {
       profile = VAProfileHEVCMain10;
       g_array_append_val (chroma_candidates, profile);
-      if (support_scc) {
-        profile = VAProfileHEVCSccMain10;
-        g_array_append_val (chroma_candidates, profile);
-      }
+      profile = VAProfileHEVCSccMain10;
+      g_array_append_val (chroma_candidates, profile);
     }
 
     if (depth <= 12) {
@@ -3818,7 +3785,6 @@ _h265_generate_gop_structure (GstVaH265Enc * self)
   prediction_direction = gst_va_encoder_get_prediction_direction (base->encoder,
       base->profile, GST_VA_BASE_ENC_ENTRYPOINT (base));
   if (prediction_direction) {
-#if VA_CHECK_VERSION(1,9,0)
     if (!(prediction_direction & VA_PREDICTION_DIRECTION_PREVIOUS)) {
       GST_INFO_OBJECT (self, "No forward prediction support");
       forward_num = 0;
@@ -3840,7 +3806,6 @@ _h265_generate_gop_structure (GstVaH265Enc * self)
       GST_INFO_OBJECT (self, "Enable low-delay-b mode");
       self->gop.low_delay_b_mode = TRUE;
     }
-#endif
   }
 
   if (forward_num > self->gop.num_ref_frames)
@@ -4172,9 +4137,15 @@ _h265_setup_encoding_features (GstVaH265Enc * self)
   self->features.transform_skip_enabled_flag =
       (features.bits.transform_skip != 0);
 
-  self->features.cu_qp_delta_enabled_flag =
-      (self->rc.rc_ctrl_mode != VA_RC_CQP);
-  self->features.diff_cu_qp_delta_depth = features.bits.cu_qp_delta;
+  if (self->rc.rc_ctrl_mode != VA_RC_CQP)
+    self->features.cu_qp_delta_enabled_flag = !!features.bits.cu_qp_delta;
+  else
+    self->features.cu_qp_delta_enabled_flag = 0;
+
+  if (self->features.cu_qp_delta_enabled_flag) {
+    self->features.diff_cu_qp_delta_depth =
+        self->features.log2_diff_max_min_luma_coding_block_size;
+  }
 
   /* TODO: use weighted pred */
   self->features.weighted_pred_flag = FALSE;
@@ -4874,9 +4845,30 @@ gst_va_h265_enc_get_property (GObject * object, guint prop_id,
     case PROP_AUD:
       g_value_set_boolean (value, self->prop.aud);
       break;
-    case PROP_MBBRC:
-      g_value_set_enum (value, self->prop.mbbrc);
+    case PROP_MBBRC:{
+      GstVaFeature mbbrc = GST_VA_FEATURE_AUTO;
+      /* Macroblock-level rate control.
+       * 0: use default,
+       * 1: always enable,
+       * 2: always disable,
+       * other: reserved. */
+      switch (self->prop.mbbrc) {
+        case 2:
+          mbbrc = GST_VA_FEATURE_DISABLED;
+          break;
+        case 1:
+          mbbrc = GST_VA_FEATURE_ENABLED;
+          break;
+        case 0:
+          mbbrc = GST_VA_FEATURE_AUTO;
+          break;
+        default:
+          g_assert_not_reached ();
+      }
+
+      g_value_set_enum (value, mbbrc);
       break;
+    }
     case PROP_BITRATE:
       g_value_set_uint (value, self->prop.bitrate);
       break;
@@ -4978,8 +4970,7 @@ gst_va_h265_enc_class_init (gpointer g_klass, gpointer class_data)
       GST_DEBUG_FUNCPTR (gst_va_h265_enc_prepare_output);
 
   {
-    display =
-        gst_va_display_drm_new_from_path (va_enc_class->render_device_path);
+    display = gst_va_display_platform_new (va_enc_class->render_device_path);
     encoder = gst_va_encoder_new (display, va_enc_class->codec,
         va_enc_class->entrypoint);
     if (gst_va_encoder_get_rate_control_enum (encoder,
@@ -5292,31 +5283,14 @@ gst_va_h265_enc_register (GstPlugin * plugin, GstVaDevice * device,
 
   type_info.class_data = cdata;
 
-  /* The first encoder to be registered should use a constant name,
-   * like vah265enc, for any additional encoders, we create unique
-   * names, using inserting the render device name. */
-  if (device->index == 0) {
-    if (entrypoint == VAEntrypointEncSlice) {
-      type_name = g_strdup ("GstVaH265Enc");
-      feature_name = g_strdup ("vah265enc");
-    } else {
-      type_name = g_strdup ("GstVaH265LPEnc");
-      feature_name = g_strdup ("vah265lpenc");
-    }
+  if (entrypoint == VAEntrypointEncSlice) {
+    gst_va_create_feature_name (device, "GstVaH265Enc", "GstVa%sH265Enc",
+        &type_name, "vah265enc", "va%sh265enc", &feature_name,
+        &cdata->description, &rank);
   } else {
-    gchar *basename = g_path_get_basename (device->render_device_path);
-    if (entrypoint == VAEntrypointEncSlice) {
-      type_name = g_strdup_printf ("GstVa%sH265Enc", basename);
-      feature_name = g_strdup_printf ("va%sh265enc", basename);
-    } else {
-      type_name = g_strdup_printf ("GstVa%sH265LPEnc", basename);
-      feature_name = g_strdup_printf ("va%sh265lpenc", basename);
-    }
-    cdata->description = basename;
-
-    /* lower rank for non-first device */
-    if (rank > 0)
-      rank--;
+    gst_va_create_feature_name (device, "GstVaH265LPEnc", "GstVa%sH265LPEnc",
+        &type_name, "vah265lpenc", "va%sh265lpenc", &feature_name,
+        &cdata->description, &rank);
   }
 
   g_once (&debug_once, _register_debug_category, NULL);

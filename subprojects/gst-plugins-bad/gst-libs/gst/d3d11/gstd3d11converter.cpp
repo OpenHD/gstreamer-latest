@@ -69,6 +69,49 @@ gst_d3d11_converter_backend_get_type (void)
   return type;
 }
 
+GType
+gst_d3d11_converter_sampler_filter_get_type (void)
+{
+  static GType filter_type = 0;
+  static const GEnumValue filter_types[] = {
+    {D3D11_FILTER_MIN_MAG_MIP_POINT,
+        "D3D11_FILTER_MIN_MAG_MIP_POINT", "min-mag-mip-point"},
+    {D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT,
+        "D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT", "min-linear-mag-mip-point"},
+    {D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+        "D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT", "min-mag-linear-mip-point"},
+    {0, nullptr, nullptr},
+  };
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    filter_type = g_enum_register_static ("GstD3D11ConverterSamplerFilter",
+        filter_types);
+  } GST_D3D11_CALL_ONCE_END;
+
+  return filter_type;
+}
+
+GType
+gst_d3d11_converter_alpha_mode_get_type (void)
+{
+  static GType type = 0;
+  static const GEnumValue alpha_mode[] = {
+    {GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED,
+        "GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED", "unspecified"},
+    {GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED,
+        "GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED", "premultiplied"},
+    {GST_D3D11_CONVERTER_ALPHA_MODE_STRAIGHT,
+        "GST_D3D11_CONVERTER_ALPHA_MODE_STRAIGHT", "straight"},
+    {0, nullptr, nullptr},
+  };
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    type = g_enum_register_static ("GstD3D11ConverterAlphaMode", alpha_mode);
+  } GST_D3D11_CALL_ONCE_END;
+
+  return type;
+}
+
 /* *INDENT-OFF* */
 using namespace Microsoft::WRL;
 /* *INDENT-ON* */
@@ -102,7 +145,9 @@ typedef struct
   PSColorSpace to_yuv_buf;
   PSColorSpace XYZ_convert_buf;
   FLOAT alpha;
-  FLOAT padding[3];
+  DWORD in_premul_alpha;
+  DWORD out_premul_alpha;
+  FLOAT padding;
 } PSConstBuffer;
 
 typedef struct
@@ -503,6 +548,8 @@ static const gchar templ_pixel_shader[] =
     "  PSColorSpace toYUVCoeff;\n"
     "  PSColorSpace primariesCoeff;\n"
     "  float AlphaMul;\n"
+    "  dword InPremulAlpha;\n"
+    "  dword OutPremulAlpha;\n"
     "};\n"
     "Texture2D shaderTexture[4] : register(t0);\n"
     "Texture1D<float> gammaDecLUT: register(t4);\n"
@@ -529,16 +576,40 @@ static const gchar templ_pixel_shader[] =
     "%s\n"
     /* XYZ_convert() function */
     "%s\n"
+    "float4 alpha_premul (float4 sample)\n"
+    "{\n"
+    "  float4 premul_tex;\n"
+    "  premul_tex.r = sample.r * sample.a;\n"
+    "  premul_tex.g = sample.g * sample.a;\n"
+    "  premul_tex.b = sample.b * sample.a;\n"
+    "  premul_tex.a = sample.a;\n"
+    "  return premul_tex;\n"
+    "}\n"
+    "float4 alpha_unpremul (float4 sample)\n"
+    "{\n"
+    "  float4 unpremul_tex;\n"
+    "  if (sample.a == 0 || sample.a == 1)\n"
+    "    return sample;\n"
+    "  unpremul_tex.r = saturate (sample.r / sample.a);\n"
+    "  unpremul_tex.g = saturate (sample.g / sample.a);\n"
+    "  unpremul_tex.b = saturate (sample.b / sample.a);\n"
+    "  unpremul_tex.a = sample.a;\n"
+    "  return unpremul_tex;\n"
+    "}\n"
     "PS_OUTPUT main(PS_INPUT input)\n"
     "{\n"
     "  float4 sample;\n"
     "  sample = sample_texture (input.Texture);\n"
+    "  if (InPremulAlpha)\n"
+    "    sample = alpha_unpremul (sample);\n"
     "  sample.a = saturate (sample.a * AlphaMul);\n"
     "  sample.xyz = to_rgb (sample.xyz, toRGBCoeff);\n"
     "  sample.xyz = gamma_decode (sample.xyz);\n"
     "  sample.xyz = XYZ_convert (sample.xyz);\n"
     "  sample.xyz = gamma_encode (sample.xyz);\n"
     "  sample.xyz = to_yuv (sample.xyz, toYUVCoeff);\n"
+    "  if (OutPremulAlpha)\n"
+    "    sample = alpha_premul (sample);\n"
     "  return build_output (sample);\n"
     "}\n";
 
@@ -598,6 +669,8 @@ enum
   PROP_DEST_MASTERING_DISPLAY_INFO,
   PROP_DEST_CONTENT_LIGHT_LEVEL,
   PROP_VIDEO_DIRECTION,
+  PROP_SRC_ALPHA_MODE,
+  PROP_DEST_ALPHA_MODE,
 };
 
 struct _GstD3D11ConverterPrivate
@@ -705,6 +778,8 @@ struct _GstD3D11ConverterPrivate
   guint blend_sample_mask;
   gboolean fill_border;
   guint64 border_color;
+  GstD3D11ConverterAlphaMode src_alpha_mode;
+  GstD3D11ConverterAlphaMode dst_alpha_mode;
 };
 
 static void gst_d3d11_converter_set_property (GObject * object, guint prop_id,
@@ -815,6 +890,14 @@ gst_d3d11_converter_class_init (GstD3D11ConverterClass * klass)
       g_param_spec_enum ("video-direction", "Video Direction",
           "Video direction", GST_TYPE_VIDEO_ORIENTATION_METHOD,
           GST_VIDEO_ORIENTATION_IDENTITY, param_flags));
+  g_object_class_install_property (object_class, PROP_SRC_ALPHA_MODE,
+      g_param_spec_enum ("src-alpha-mode", "Src Alpha Mode",
+          "Src alpha mode to use", GST_TYPE_D3D11_CONVERTER_ALPHA_MODE,
+          GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED, param_flags));
+  g_object_class_install_property (object_class, PROP_DEST_ALPHA_MODE,
+      g_param_spec_enum ("dest-alpha-mode", "Dest Alpha Mode",
+          "Dest alpha mode to use", GST_TYPE_D3D11_CONVERTER_ALPHA_MODE,
+          GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED, param_flags));
 
   GST_DEBUG_CATEGORY_INIT (gst_d3d11_converter_debug,
       "d3d11converter", 0, "d3d11converter");
@@ -825,6 +908,8 @@ gst_d3d11_converter_init (GstD3D11Converter * self)
 {
   self->priv = (GstD3D11ConverterPrivate *)
       gst_d3d11_converter_get_instance_private (self);
+  self->priv->src_alpha_mode = self->priv->dst_alpha_mode =
+      GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED;
 }
 
 static void
@@ -1034,6 +1119,38 @@ gst_d3d11_converter_set_property (GObject * object, guint prop_id,
       }
       break;
     }
+    case PROP_SRC_ALPHA_MODE:
+    {
+      DWORD prev_premul = priv->const_data.in_premul_alpha;
+      priv->src_alpha_mode = (GstD3D11ConverterAlphaMode)
+          g_value_get_enum (value);
+      if (priv->src_alpha_mode == GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED) {
+        priv->const_data.in_premul_alpha = TRUE;
+      } else {
+        priv->const_data.in_premul_alpha = FALSE;
+      }
+
+      if (prev_premul != priv->const_data.in_premul_alpha) {
+        priv->update_alpha = TRUE;
+      }
+      break;
+    }
+    case PROP_DEST_ALPHA_MODE:
+    {
+      DWORD prev_premul = priv->const_data.out_premul_alpha;
+      priv->dst_alpha_mode = (GstD3D11ConverterAlphaMode)
+          g_value_get_enum (value);
+      if (priv->dst_alpha_mode == GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED) {
+        priv->const_data.out_premul_alpha = TRUE;
+      } else {
+        priv->const_data.out_premul_alpha = FALSE;
+      }
+
+      if (prev_premul != priv->const_data.out_premul_alpha) {
+        priv->update_alpha = TRUE;
+      }
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -1114,6 +1231,12 @@ gst_d3d11_converter_get_property (GObject * object, guint prop_id,
       break;
     case PROP_VIDEO_DIRECTION:
       g_value_set_enum (value, priv->video_direction);
+      break;
+    case PROP_SRC_ALPHA_MODE:
+      g_value_set_enum (value, priv->src_alpha_mode);
+      break;
+    case PROP_DEST_ALPHA_MODE:
+      g_value_set_enum (value, priv->dst_alpha_mode);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1259,7 +1382,8 @@ get_vuya_component (GstVideoFormat format, gchar * y, gchar * u,
 
 static gboolean
 gst_d3d11_color_convert_setup_shader (GstD3D11Converter * self,
-    const GstVideoInfo * in_info, const GstVideoInfo * out_info)
+    const GstVideoInfo * in_info, const GstVideoInfo * out_info,
+    D3D11_FILTER sampler_filter)
 {
   GstD3D11ConverterPrivate *priv = self->priv;
   GstD3D11Device *device = self->device;
@@ -1290,7 +1414,7 @@ gst_d3d11_color_convert_setup_shader (GstD3D11Converter * self,
   context_handle = gst_d3d11_device_get_device_context_handle (device);
 
   /* bilinear filtering */
-  sampler_desc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+  sampler_desc.Filter = sampler_filter;
   sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
   sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
   sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -3106,6 +3230,7 @@ gst_d3d11_converter_new (GstD3D11Device * device, const GstVideoInfo * in_info,
   guint wanted_backend = 0;
   gboolean allow_gamma = FALSE;
   gboolean allow_primaries = FALSE;
+  D3D11_FILTER sampler_filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
   gchar *backend_str;
 
   g_return_val_if_fail (GST_IS_D3D11_DEVICE (device), nullptr);
@@ -3133,6 +3258,8 @@ gst_d3d11_converter_new (GstD3D11Device * device, const GstVideoInfo * in_info,
       allow_primaries = TRUE;
     }
 
+    gst_structure_get_enum (config, GST_D3D11_CONVERTER_OPT_SAMPLER_FILTER,
+        GST_TYPE_D3D11_CONVERTER_SAMPLER_FILTER, (int *) &sampler_filter);
     gst_structure_free (config);
   }
 
@@ -3306,8 +3433,10 @@ gst_d3d11_converter_new (GstD3D11Device * device, const GstVideoInfo * in_info,
       goto out;
   }
 
-  if (!gst_d3d11_color_convert_setup_shader (self, in_info, out_info))
+  if (!gst_d3d11_color_convert_setup_shader (self, in_info, out_info,
+          sampler_filter)) {
     goto out;
+  }
 
   priv->supported_backend |= GST_D3D11_CONVERTER_BACKEND_SHADER;
 
@@ -4145,9 +4274,16 @@ gst_d3d11_converter_convert_buffer_internal (GstD3D11Converter * self,
     if (in_d3d11)
       piv_available = gst_d3d11_converter_piv_available (self, in_buf);
 
-    if ((priv->supported_backend & GST_D3D11_CONVERTER_BACKEND_SHADER) != 0) {
+    if ((priv->supported_backend & GST_D3D11_CONVERTER_BACKEND_SHADER) == 0) {
       /* processor only */
       use_processor = TRUE;
+    } else if ((priv->src_alpha_mode ==
+            GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED ||
+            priv->dst_alpha_mode ==
+            GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED)
+        && GST_VIDEO_INFO_HAS_ALPHA (&priv->in_info)) {
+      /* Needs alpha conversion */
+      use_processor = FALSE;
     } else if (piv_available) {
       in_dmem = (GstD3D11Memory *) gst_buffer_peek_memory (in_buf, 0);
 

@@ -278,16 +278,17 @@ print_keyboard_help (void)
     const gchar *key_help;
   } key_controls[] = {
     {
-    "space", "pause/unpause"}, {
-    "q or ESC", "quit"}, {
-    "\342\206\222", "seek forward"}, {
-    "\342\206\220", "seek backward"}, {
-    "+", "increase playback rate"}, {
-    "-", "decrease playback rate"}, {
-    "t", "enable/disable trick modes"}, {
-    "s", "change subtitle track"}, {
-    "0", "seek to beginning"}, {
-  "k", "show keyboard shortcuts"},};
+        "space", "pause/unpause"}, {
+        "q or ESC", "quit"}, {
+        "\342\206\222", "seek forward"}, {
+        "\342\206\220", "seek backward"}, {
+        "+", "increase playback rate"}, {
+        "-", "decrease playback rate"}, {
+        "t", "enable/disable trick modes"}, {
+        "s", "change subtitle track"}, {
+        "0", "seek to beginning"}, {
+        "k", "show keyboard shortcuts"},
+  };
   guint i, chars_to_pad, desc_len, max_desc_len = 0;
 
   gst_print ("\n\n%s\n\n", "Interactive mode - keyboard controls:");
@@ -960,7 +961,9 @@ _set_sink (GESLauncher * self, const gchar * sink_desc, SetSinkFunc set_func)
   if (sink_desc != NULL) {
     GError *err = NULL;
     GstElement *sink = gst_parse_bin_from_description_full (sink_desc, TRUE,
-        NULL, GST_PARSE_FLAG_NO_SINGLE_ELEMENT_BINS, &err);
+        NULL,
+        GST_PARSE_FLAG_NO_SINGLE_ELEMENT_BINS | GST_PARSE_FLAG_PLACE_IN_BIN,
+        &err);
     if (sink == NULL) {
       GST_ERROR ("could not create the requested videosink %s (err: %s), "
           "exiting", err ? err->message : "", sink_desc);
@@ -1443,6 +1446,10 @@ ges_launcher_parse_options (GESLauncher * self,
     {"no-interactive", 0, G_OPTION_FLAG_REVERSE, G_OPTION_ARG_NONE,
           &opts->interactive,
         "Disable interactive control via the keyboard", NULL
+    },
+    {"ignore-eos", 0, 0, G_OPTION_ARG_NONE,
+          &opts->ignore_eos,
+        "Ignore EOS.", NULL
     },
     {NULL}
   };

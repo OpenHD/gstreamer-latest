@@ -141,34 +141,34 @@ create_rtp_vp9_buffer_full (guint seqnum, guint picid, guint buffer_type,
     gint picid_bits;
   } templates[] = {
     {
-    intra_nopicid_seqnum0, sizeof (intra_nopicid_seqnum0), 0}
+        intra_nopicid_seqnum0, sizeof (intra_nopicid_seqnum0), 0}
     , {
-    intra_picid24_seqnum0, sizeof (intra_picid24_seqnum0), 7}
+        intra_picid24_seqnum0, sizeof (intra_picid24_seqnum0), 7}
     , {
-    intra_picid6336_seqnum0, sizeof (intra_picid6336_seqnum0), 15}
+        intra_picid6336_seqnum0, sizeof (intra_picid6336_seqnum0), 15}
     ,
-        /*
-           { intra_nopicid_seqnum0_tl1_sync_tl0picidx12,
-           sizeof (intra_nopicid_seqnum0_tl1_sync_tl0picidx12),
-           0
-           },
-           { intra_picid24_seqnum0_tl1_sync_tl0picidx12,
-           sizeof (intra_picid24_seqnum0_tl1_sync_tl0picidx12),
-           7
-           },
-           { intra_picid6336_seqnum0_tl1_sync_tl0picidx12,
-           sizeof (intra_picid6336_seqnum0_tl1_sync_tl0picidx12),
-           15
-           },
-           { intra_picid24_seqnum0_tl1_sync_no_tl0picidx,
-           sizeof (intra_picid24_seqnum0_tl1_sync_no_tl0picidx),
-           7
-           },
-           { intra_picid24_seqnum0_notyk_tl0picidx12,
-           sizeof (intra_picid24_seqnum0_notyk_tl0picidx12),
-           7
-           }
-         */
+    /*
+       { intra_nopicid_seqnum0_tl1_sync_tl0picidx12,
+       sizeof (intra_nopicid_seqnum0_tl1_sync_tl0picidx12),
+       0
+       },
+       { intra_picid24_seqnum0_tl1_sync_tl0picidx12,
+       sizeof (intra_picid24_seqnum0_tl1_sync_tl0picidx12),
+       7
+       },
+       { intra_picid6336_seqnum0_tl1_sync_tl0picidx12,
+       sizeof (intra_picid6336_seqnum0_tl1_sync_tl0picidx12),
+       15
+       },
+       { intra_picid24_seqnum0_tl1_sync_no_tl0picidx,
+       sizeof (intra_picid24_seqnum0_tl1_sync_no_tl0picidx),
+       7
+       },
+       { intra_picid24_seqnum0_notyk_tl0picidx12,
+       sizeof (intra_picid24_seqnum0_notyk_tl0picidx12),
+       7
+       }
+     */
   };
   struct BufferTemplate *template = &templates[buffer_type];
   guint8 *packet = g_memdup2 (template->template, template->size);
@@ -229,18 +229,9 @@ typedef struct _DepayGapEventTestData
   guint buffer_type;
 } DepayGapEventTestData;
 
-typedef struct
-{
-  gint seq_num;
-  gint picid;
-  guint buffer_type;
-  gboolean s_bit;
-  gboolean marker_bit;
-} DepayGapEventTestDataFull;
-
 static void
 test_depay_gap_event_base (const DepayGapEventTestData * data,
-    gboolean send_lost_event, gboolean expect_gap_event, int iter)
+    gboolean send_lost_event, gboolean expect_gap_event)
 {
   GstEvent *event;
   GstClockTime pts = 0;
@@ -314,8 +305,7 @@ static const DepayGapEventTestData stop_gap_events_test_data[][2] = {
 
 GST_START_TEST (test_depay_stop_gap_events)
 {
-  test_depay_gap_event_base (&stop_gap_events_test_data[__i__][0], TRUE, FALSE,
-      __i__);
+  test_depay_gap_event_base (&stop_gap_events_test_data[__i__][0], TRUE, FALSE);
 }
 
 GST_END_TEST;
@@ -340,8 +330,7 @@ static const DepayGapEventTestData resend_gap_event_test_data[][2] = {
 
 GST_START_TEST (test_depay_resend_gap_event)
 {
-  test_depay_gap_event_base (&resend_gap_event_test_data[__i__][0], TRUE, TRUE,
-      __i__);
+  test_depay_gap_event_base (&resend_gap_event_test_data[__i__][0], TRUE, TRUE);
 }
 
 GST_END_TEST;
@@ -450,11 +439,54 @@ GST_START_TEST (test_depay_svc_forgive_invalid_sid)
 
 GST_END_TEST;
 
+GST_START_TEST (test_pay_delta_unit_flag)
+{
+  guint8 vp9_bitstream_payload[] = {
+    0xa2, 0x49, 0x83, 0x42, 0x20, 0x00, 0x1e, 0x00,
+    0x1e, 0xc0, 0x07, 0x04, 0x83, 0x83, 0x08, 0x40,
+    0x00, 0x06, 0x60, 0x00, 0x00, 0x10, 0xbf, 0xff,
+    0x5a, 0x0f, 0xff, 0xff, 0xff, 0xfb, 0xc9, 0x83,
+    0xff, 0xff, 0xff, 0xff, 0x34, 0xca, 0x00
+  };
+
+  /* set mtu so that the buffer is split into multiple packets */
+  GstHarness *h = gst_harness_new_parse ("rtpvp9pay mtu=48");
+  GstFlowReturn ret;
+  GstBuffer *buffer;
+
+  gst_harness_set_src_caps_str (h, "video/x-vp9");
+
+  buffer = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
+      vp9_bitstream_payload, sizeof (vp9_bitstream_payload), 0,
+      sizeof (vp9_bitstream_payload), NULL, NULL);
+
+  ret = gst_harness_push (h, buffer);
+  fail_unless_equals_int (ret, GST_FLOW_OK);
+
+  /* the input buffer should be split into two buffers and pushed as a buffer
+   * list, only the first buffer of the first buffer list should be marked as a
+   * non-delta unit */
+  buffer = gst_harness_pull (h);
+  fail_unless (!GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT));
+  gst_buffer_unref (buffer);
+  buffer = gst_harness_pull (h);
+  fail_unless (GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT));
+  gst_buffer_unref (buffer);
+
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
 static Suite *
 rtpvp9_suite (void)
 {
   Suite *s = suite_create ("rtpvp9");
   TCase *tc_chain;
+
+  suite_add_tcase (s, (tc_chain = tcase_create ("vp9pay")));
+  tcase_add_test (tc_chain, test_pay_delta_unit_flag);
+
   suite_add_tcase (s, (tc_chain = tcase_create ("vp9depay")));
   tcase_add_test (tc_chain, test_depay_flexible_mode);
   tcase_add_test (tc_chain, test_depay_non_flexible_mode);

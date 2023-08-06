@@ -31,6 +31,7 @@
 
 #include "gstvacaps.h"
 #include "gstvadisplay_priv.h"
+#include <string.h>
 
 struct _GstVaFilter
 {
@@ -445,9 +446,7 @@ static const struct VaFilterCapMap {
   F(TotalColorCorrection, VAProcTotalColorCorrectionCount),
   F(HVSNoiseReduction, 0),
   F(HighDynamicRangeToneMapping, VAProcHighDynamicRangeMetadataTypeCount),
-#if VA_CHECK_VERSION (1, 12, 0)
   F(3DLUT, 16),
-#endif
 #undef F
 };
 /* *INDENT-ON* */
@@ -484,9 +483,7 @@ struct VaFilter
     VAProcFilterCapTotalColorCorrection cc[VAProcTotalColorCorrectionCount];
       VAProcFilterCapHighDynamicRange
         hdr[VAProcHighDynamicRangeMetadataTypeCount];
-#if VA_CHECK_VERSION (1, 12, 0)
     VAProcFilterCap3DLUT lut[16];
-#endif
   } caps;
 };
 
@@ -1260,9 +1257,7 @@ _config_color_properties (VAProcColorStandardType * std,
   if (worstscore == 0) {
     /* No properties specified, there's not a useful choice. */
     *std = VAProcColorStandardNone;
-    *props = (VAProcColorProperties) {
-    };
-
+    memset (props, 0, sizeof (VAProcColorProperties));
     return;
   }
 

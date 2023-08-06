@@ -564,10 +564,20 @@ GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (glvideomixer, "glvideomixer",
 static void
 gst_gl_video_mixer_bin_init (GstGLVideoMixerBin * self)
 {
+}
+
+static void
+gst_gl_video_mixer_bin_constructed (GObject * self)
+{
   GstGLMixerBin *mix_bin = GST_GL_MIXER_BIN (self);
 
   gst_gl_mixer_bin_finish_init_with_element (mix_bin,
-      g_object_new (GST_TYPE_GL_VIDEO_MIXER, NULL));
+      g_object_new (GST_TYPE_GL_VIDEO_MIXER,
+          "force-live", mix_bin->force_live,
+          "latency", mix_bin->latency,
+          "start-time-selection", mix_bin->start_time_selection,
+          "start-time", mix_bin->start_time,
+          "min-upstream-latency", mix_bin->min_upstream_latency, NULL));
 }
 
 static void
@@ -580,6 +590,7 @@ gst_gl_video_mixer_bin_class_init (GstGLVideoMixerBinClass * klass)
 
   mixer_class->create_input_pad = _create_video_mixer_input;
 
+  gobject_class->constructed = gst_gl_video_mixer_bin_constructed;
   gobject_class->set_property = gst_gl_video_mixer_bin_set_property;
   gobject_class->get_property = gst_gl_video_mixer_bin_get_property;
 
@@ -655,8 +666,6 @@ static gboolean gst_gl_video_mixer_propose_allocation (GstAggregator *
     agg, GstAggregatorPad * agg_pad, GstQuery * decide_query, GstQuery * query);
 static gboolean gst_gl_video_mixer_gl_start (GstGLBaseMixer * base_mix);
 static void gst_gl_video_mixer_gl_stop (GstGLBaseMixer * base_mix);
-static gboolean gst_gl_video_mixer_set_caps (GstGLMixer * mixer,
-    GstCaps * outcaps);
 
 static gboolean gst_gl_video_mixer_process_textures (GstGLMixer * mixer,
     GstGLMemory * out_tex);
@@ -1294,6 +1303,7 @@ gst_gl_video_mixer_class_init (GstGLVideoMixerClass * klass)
       "Filter/Effect/Video/Compositor", "OpenGL video_mixer",
       "Matthew Waters <matthew@centricular.com>");
 
+  gst_gl_mixer_class_add_rgba_pad_templates (GST_GL_MIXER_CLASS (klass));
   gst_element_class_add_static_pad_template_with_gtype (element_class,
       &sink_factory, GST_TYPE_GL_VIDEO_MIXER_PAD);
 
@@ -1302,7 +1312,6 @@ gst_gl_video_mixer_class_init (GstGLVideoMixerClass * klass)
           GST_TYPE_GL_VIDEO_MIXER_BACKGROUND,
           DEFAULT_BACKGROUND, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-  GST_GL_MIXER_CLASS (klass)->set_caps = gst_gl_video_mixer_set_caps;
   GST_GL_MIXER_CLASS (klass)->process_textures =
       gst_gl_video_mixer_process_textures;
 
@@ -1785,17 +1794,6 @@ gst_gl_video_mixer_src_event (GstAggregator * agg, GstEvent * event)
   return GST_AGGREGATOR_CLASS (parent_class)->src_event (agg, event);
 }
 
-static gboolean
-gst_gl_video_mixer_set_caps (GstGLMixer * mixer, GstCaps * outcaps)
-{
-  GstGLVideoMixer *video_mixer = GST_GL_VIDEO_MIXER (mixer);
-
-  /* need reconfigure output geometry */
-  video_mixer->output_geo_change = TRUE;
-
-  return TRUE;
-}
-
 static void
 gst_gl_video_mixer_gl_stop (GstGLBaseMixer * base_mix)
 {
@@ -1813,6 +1811,8 @@ static gboolean
 gst_gl_video_mixer_gl_start (GstGLBaseMixer * base_mix)
 {
   GstGLVideoMixer *video_mixer = GST_GL_VIDEO_MIXER (base_mix);
+
+  video_mixer->output_geo_change = TRUE;
 
   if (!video_mixer->shader) {
     gchar *frag_str = g_strdup_printf ("%s%s",
@@ -1834,9 +1834,12 @@ static void
 _video_mixer_process_gl (GstGLContext * context, GstGLVideoMixer * video_mixer)
 {
   GstGLMixer *mixer = GST_GL_MIXER (video_mixer);
+  GstGLFramebuffer *fbo = gst_gl_mixer_get_framebuffer (mixer);
 
-  gst_gl_framebuffer_draw_to_texture (mixer->fbo, video_mixer->out_tex,
+  gst_gl_framebuffer_draw_to_texture (fbo, video_mixer->out_tex,
       gst_gl_video_mixer_callback, video_mixer);
+
+  gst_clear_object (&fbo);
 }
 
 static gboolean

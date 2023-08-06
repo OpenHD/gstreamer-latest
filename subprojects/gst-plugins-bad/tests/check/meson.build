@@ -35,6 +35,7 @@ base_tests = [
   [['elements/cudaconvert.c'], false, [gstgl_dep, gmodule_dep]],
   [['elements/cudafilter.c'], false, [gstgl_dep, gmodule_dep]],
   [['elements/d3d11colorconvert.c'], host_machine.system() != 'windows', ],
+  [['elements/d3d11videosink.c'], host_machine.system() != 'windows', ],
   [['elements/fdkaac.c'], not fdkaac_dep.found(), ],
   [['elements/gdpdepay.c'], get_option('gdp').disabled()],
   [['elements/gdppay.c'], get_option('gdp').disabled()],
@@ -67,6 +68,7 @@ base_tests = [
   [['elements/rtponviftimestamp.c'], get_option('onvif').disabled()],
   [['elements/rtpsrc.c'], get_option('rtp').disabled()],
   [['elements/rtpsink.c'], get_option('rtp').disabled()],
+  [['elements/sdpdemux.c'], get_option('sdp').disabled(), [gstsdp_dep]],
   [['elements/srtp.c'], not srtp_dep.found(), [srtp_dep]],
   [['elements/switchbin.c'], get_option('switchbin').disabled()],
   [['elements/videoframe-audiolevel.c'], get_option('videoframe_audiolevel').disabled()],
@@ -91,6 +93,7 @@ base_tests = [
   [['libs/av1parser.c'], false, [gstcodecparsers_dep]],
   [['libs/h264bitwriter.c'], false, [gstcodecparsers_dep]],
   [['libs/h265bitwriter.c'], false, [gstcodecparsers_dep]],
+  [['libs/vkformat.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkmemory.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['elements/vkcolorconvert.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkwindow.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
@@ -99,7 +102,9 @@ base_tests = [
   [['libs/vkcommandpool.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkimage.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkinstance.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
+  [['libs/vkimagebufferpool.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/d3d11device.cpp'], not gstd3d11_dep.found(), [gstd3d11_dep]],
+  [['libs/d3d11memory.c'], not gstd3d11_dep.found(), [gstd3d11_dep]],
   [['libs/cudamemory.c'], not gstcuda_dep.found(), [gstcuda_dep, gstcuda_stub_dep]],
 ]
 
@@ -125,7 +130,7 @@ if host_machine.system() != 'windows'
     [['elements/curlftpsink.c'], not curl_dep.found(), [curl_dep]],
     [['elements/curlsmtpsink.c'], not curl_dep.found(), [curl_dep]],
     [['elements/dash_mpd.c'], not xml2_dep.found(), [xml2_dep]],
-    [['elements/dtls.c'], not libcrypto_dep.found(), [libcrypto_dep]],
+    [['elements/dtls.c'], not libcrypto_dep.found() or not openssl_dep.found (), [libcrypto_dep]],
     [['elements/faac.c'],
         not faac_dep.found() or not cc.has_header_symbol('faac.h', 'faacEncOpen') or not cdata.has('HAVE_UNISTD_H'),
         [faac_dep]],
@@ -145,6 +150,7 @@ if host_machine.system() != 'windows'
     [['elements/x265enc.c'], not x265_dep.found(), [x265_dep]],
     [['elements/zbar.c'], not zbar_dep.found(), [zbar_dep]],
     [['elements/zxing.c'], not zxing_dep.found(), [zxing_dep]],
+    [['elements/lc3.c'], not lc3_dep.found(), [lc3_dep]],
   ]
 endif
 
@@ -156,13 +162,14 @@ if host_machine.system() == 'linux'
   ]
 endif
 
+fsmod = import('fs')
 test_defines = [
   '-UG_DISABLE_ASSERT',
   '-UG_DISABLE_CAST_CHECKS',
   '-DGST_CHECK_TEST_ENVIRONMENT_BEACON="GST_STATE_IGNORE_ELEMENTS"',
-  '-DGST_TEST_FILES_PATH="' + meson.current_source_dir() + '/../files"',
-  '-DTEST_PATH="' + meson.current_build_dir() + '/media"',
-  '-DDASH_MPD_DATADIR=' + meson.current_source_dir() + '/elements/dash_mpd_data',
+  '-DGST_TEST_FILES_PATH="' + fsmod.as_posix(meson.current_source_dir()) + '/../files"',
+  '-DTEST_PATH="' + fsmod.as_posix(meson.current_build_dir()) + '/media"',
+  '-DDASH_MPD_DATADIR=' + fsmod.as_posix(meson.current_source_dir()) + '/elements/dash_mpd_data',
   '-DGST_USE_UNSTABLE_API',
 ]
 

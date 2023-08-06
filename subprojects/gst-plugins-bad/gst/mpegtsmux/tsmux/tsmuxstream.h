@@ -209,7 +209,9 @@ struct TsMuxStream {
 
   /* Opus */
   gboolean is_opus;
-  guint8 opus_channel_config_code;
+  guint8 opus_channel_config[1 + 2 + 1 + 1 + 255];
+  gsize opus_channel_config_len;
+
   /* Jpeg2000 */
   gint32 horizontal_size;
   gint32 vertical_size;
@@ -223,7 +225,7 @@ struct TsMuxStream {
 };
 
 /* stream management */
-TsMuxStream *	tsmux_stream_new 		(guint16 pid, guint stream_type);
+TsMuxStream *	tsmux_stream_new 		(guint16 pid, guint stream_type, guint stream_number);
 void 		tsmux_stream_free 		(TsMuxStream *stream);
 
 guint16         tsmux_stream_get_pid            (TsMuxStream *stream);

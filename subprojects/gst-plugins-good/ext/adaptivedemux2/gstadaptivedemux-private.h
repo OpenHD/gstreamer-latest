@@ -107,8 +107,6 @@ struct _GstAdaptiveDemuxPrivate
    */
   gboolean streams_can_download_fragments;
 
-  GMutex api_lock;
-
   /* Protects demux and stream segment information
    * Needed because seeks can update segment information
    * without needing to stop tasks when they just want to
@@ -199,6 +197,7 @@ gboolean gst_adaptive_demux_get_live_seek_range (GstAdaptiveDemux * demux,
 gboolean gst_adaptive_demux2_stream_in_live_seek_range (GstAdaptiveDemux * demux,
     GstAdaptiveDemux2Stream * stream);
 gboolean gst_adaptive_demux2_stream_is_selected_locked (GstAdaptiveDemux2Stream *stream);
+gboolean gst_adaptive_demux2_stream_is_default_locked (GstAdaptiveDemux2Stream *stream);
 
 gboolean gst_adaptive_demux_has_next_period (GstAdaptiveDemux * demux);
 void gst_adaptive_demux_advance_period (GstAdaptiveDemux * demux);

@@ -188,6 +188,9 @@ ges_timeline_set_smart_rendering (GESTimeline * timeline, gboolean rendering_sma
 G_GNUC_INTERNAL gboolean
 ges_timeline_get_smart_rendering (GESTimeline *timeline);
 
+G_GNUC_INTERNAL GstStreamCollection*
+ges_timeline_get_stream_collection (GESTimeline *timeline);
+
 G_GNUC_INTERNAL void
 ges_auto_transition_set_source (GESAutoTransition * self, GESTrackElement * source, GESEdge edge);
 
@@ -497,6 +500,7 @@ ges_source_get_rendering_smartly                      (GESSource *source);
 
 G_GNUC_INTERNAL void ges_track_set_smart_rendering     (GESTrack* track, gboolean rendering_smartly);
 G_GNUC_INTERNAL GstElement * ges_track_get_composition (GESTrack *track);
+G_GNUC_INTERNAL void ges_track_select_subtimeline_streams (GESTrack *track, GstStreamCollection *collection, GstElement *subtimeline);
 
 
 /*********************************************
@@ -593,6 +597,14 @@ G_GNUC_INTERNAL gchar *ges_test_source_asset_check_id         (GType type, const
 G_GNUC_INTERNAL GESMarker * ges_marker_list_get_closest (GESMarkerList *list, GstClockTime position);
 G_GNUC_INTERNAL gchar * ges_marker_list_serialize (const GValue * v);
 G_GNUC_INTERNAL gboolean ges_marker_list_deserialize (GValue *dest, const gchar *s);
+
+/*******************************
+ *       GESDiscovererManager   *
+ *******************************/
+G_GNUC_INTERNAL void ges_discoverer_manager_cleanup                  (void);
+G_GNUC_INTERNAL gboolean ges_discoverer_manager_start_discovery      (GESDiscovererManager *self,
+                                                                      const gchar *uri);
+G_GNUC_INTERNAL void ges_discoverer_manager_recreate_discoverer      (GESDiscovererManager *self);
 
 /********************
  *  Gnonlin helpers *

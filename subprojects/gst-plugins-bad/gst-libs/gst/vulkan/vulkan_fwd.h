@@ -111,6 +111,9 @@ typedef struct _GstVulkanFullScreenQuad GstVulkanFullScreenQuad;
 typedef struct _GstVulkanFullScreenQuadClass GstVulkanFullScreenQuadClass;
 typedef struct _GstVulkanFullScreenQuadPrivate GstVulkanFullScreenQuadPrivate;
 
+typedef struct _GstVulkanQueueFamilyOps GstVulkanQueueFamilyOps;
+typedef struct _GstVulkanVideoProfile GstVulkanVideoProfile;
+
 G_END_DECLS
 
 #endif /* __GST_VULKAN_FWD_H__ */

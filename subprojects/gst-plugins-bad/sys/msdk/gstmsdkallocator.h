@@ -45,7 +45,7 @@ struct _GstMsdkMemoryID {
   mfxU32 fourcc;
 
 #ifndef _WIN32
-  VASurfaceID *surface;
+  VASurfaceID surface;
   VAImage image;
   VADRMPRIMESurfaceDescriptor desc;
 #else
@@ -77,6 +77,9 @@ void gst_msdk_set_frame_allocator (GstMsdkContext * context);
 GstMsdkSurface *
 gst_msdk_import_to_msdk_surface (GstBuffer * buf, GstMsdkContext * msdk_context,
     GstVideoInfo * vinfo, guint map_flag);
+
+GQuark
+gst_msdk_frame_surface_quark_get (void);
 
 G_END_DECLS
 

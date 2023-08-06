@@ -234,20 +234,20 @@ gst_jpeg_dec_term_source (j_decompress_ptr cinfo)
 }
 
 METHODDEF (void)
-    gst_jpeg_dec_my_output_message (j_common_ptr cinfo)
+gst_jpeg_dec_my_output_message (j_common_ptr cinfo)
 {
   return;                       /* do nothing */
 }
 
 METHODDEF (void)
-    gst_jpeg_dec_my_emit_message (j_common_ptr cinfo, int msg_level)
+gst_jpeg_dec_my_emit_message (j_common_ptr cinfo, int msg_level)
 {
   /* GST_LOG_OBJECT (CINFO_GET_JPEGDEC (&cinfo), "msg_level=%d", msg_level); */
   return;
 }
 
 METHODDEF (void)
-    gst_jpeg_dec_my_error_exit (j_common_ptr cinfo)
+gst_jpeg_dec_my_error_exit (j_common_ptr cinfo)
 {
   struct GstJpegDecErrorMgr *err_mgr = (struct GstJpegDecErrorMgr *) cinfo->err;
 
@@ -880,7 +880,7 @@ gst_jpeg_dec_decode_direct (GstJpegDec * dec, GstVideoFrame * frame,
   gint lines, v_samp[3];
   guchar *base[3], *last[3];
   gint stride[3];
-  guint height, field_height;
+  guint field_height;
 
   line[0] = y;
   line[1] = u;
@@ -893,7 +893,7 @@ gst_jpeg_dec_decode_direct (GstJpegDec * dec, GstVideoFrame * frame,
   if (G_UNLIKELY (v_samp[0] > 2 || v_samp[1] > 2 || v_samp[2] > 2))
     goto format_not_supported;
 
-  height = field_height = GST_VIDEO_FRAME_HEIGHT (frame);
+  field_height = GST_VIDEO_FRAME_HEIGHT (frame);
 
   /* XXX: division by 2 here might not be a good idea yes. But we are doing this
    * already in gst_jpeg_dec_handle_frame() for interlaced jpeg */
@@ -943,7 +943,7 @@ gst_jpeg_dec_decode_direct (GstJpegDec * dec, GstVideoFrame * frame,
   } else
 #endif
   {
-    for (i = 0; i < height; i += v_samp[0] * DCTSIZE) {
+    for (i = 0; i < field_height; i += v_samp[0] * DCTSIZE) {
       for (j = 0; j < (v_samp[0] * DCTSIZE); ++j) {
         /* Y */
         line[0][j] = base[0] + (i + j) * stride[0];
@@ -1406,8 +1406,8 @@ gst_jpeg_dec_handle_frame (GstVideoDecoder * bdec, GstVideoCodecFrame * frame)
   /* is it interlaced MJPEG? (we really don't want to scan the jpeg data
    * to see if there are two SOF markers in the packet to detect this) */
   if (gst_video_decoder_get_packetized (bdec) &&
-      dec->input_state &&
-      dec->input_state->info.height > height &&
+      dec->input_state && height > DCTSIZE &&
+      dec->input_state->info.height > (2 * (height - DCTSIZE)) &&
       dec->input_state->info.height <= (height * 2)
       && dec->input_state->info.width == width) {
     GST_LOG_OBJECT (dec,

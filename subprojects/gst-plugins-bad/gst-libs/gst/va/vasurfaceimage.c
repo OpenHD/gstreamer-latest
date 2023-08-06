@@ -50,13 +50,13 @@ va_destroy_surfaces (GstVaDisplay * display, VASurfaceID * surfaces,
 
 gboolean
 va_create_surfaces (GstVaDisplay * display, guint rt_format, guint fourcc,
-    guint width, guint height, gint usage_hint,
-    VASurfaceAttribExternalBuffers * ext_buf, VASurfaceID * surfaces,
-    guint num_surfaces)
+    guint width, guint height, gint usage_hint, guint64 * modifiers,
+    guint num_modifiers, VASurfaceAttribExternalBuffers * ext_buf,
+    VASurfaceID * surfaces, guint num_surfaces)
 {
   VADisplay dpy = gst_va_display_get_va_dpy (display);
   /* *INDENT-OFF* */
-  VASurfaceAttrib attrs[5] = {
+  VASurfaceAttrib attrs[6] = {
     {
       .type = VASurfaceAttribUsageHint,
       .flags = VA_SURFACE_ATTRIB_SETTABLE,
@@ -71,6 +71,10 @@ va_create_surfaces (GstVaDisplay * display, guint rt_format, guint fourcc,
                                ? VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME
                                : VA_SURFACE_ATTRIB_MEM_TYPE_VA,
     },
+  };
+  VADRMFormatModifierList modifier_list = {
+    .num_modifiers = num_modifiers,
+    .modifiers = modifiers,
   };
   /* *INDENT-ON* */
   VAStatus status;
@@ -100,6 +104,17 @@ va_create_surfaces (GstVaDisplay * display, guint rt_format, guint fourcc,
     /* *INDENT-ON* */
   }
 
+  if (num_modifiers > 0 && modifiers) {
+    /* *INDENT-OFF* */
+    attrs[num_attrs++] = (VASurfaceAttrib) {
+      .type = VASurfaceAttribDRMFormatModifiers,
+      .flags = VA_SURFACE_ATTRIB_SETTABLE,
+      .value.type = VAGenericValueTypePointer,
+      .value.value.p = &modifier_list,
+    };
+    /* *INDENT-ON* */
+  }
+
   status = vaCreateSurfaces (dpy, rt_format, width, height, surfaces,
       num_surfaces, attrs, num_attrs);
   if (status != VA_STATUS_SUCCESS) {
@@ -120,7 +135,7 @@ va_export_surface_to_dmabuf (GstVaDisplay * display, VASurfaceID surface,
   status = vaExportSurfaceHandle (dpy, surface,
       VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2, flags, desc);
   if (status != VA_STATUS_SUCCESS) {
-    GST_ERROR ("vaExportSurfaceHandle: %s", vaErrorStr (status));
+    GST_INFO ("vaExportSurfaceHandle: %s", vaErrorStr (status));
     return FALSE;
   }
 
@@ -296,7 +311,6 @@ va_check_surface (GstVaDisplay * display, VASurfaceID surface)
 gboolean
 va_copy_surface (GstVaDisplay * display, VASurfaceID dst, VASurfaceID src)
 {
-#if VA_CHECK_VERSION (1, 12, 0)
   VADisplay dpy = gst_va_display_get_va_dpy (display);
   /* *INDENT-OFF* */
   VACopyObject obj_src = {
@@ -326,7 +340,4 @@ va_copy_surface (GstVaDisplay * display, VASurfaceID dst, VASurfaceID src)
     return FALSE;
   }
   return TRUE;
-#else
-  return FALSE;
-#endif
 }

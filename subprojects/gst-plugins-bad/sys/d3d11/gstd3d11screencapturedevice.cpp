@@ -157,8 +157,8 @@ static void
       GST_DEBUG_FUNCPTR (gst_d3d11_screen_capture_device_provider_probe);
 
   gst_device_provider_class_set_static_metadata (provider_class,
-      "Direct3D11 Desktop Capture Device Provider",
-      "Source/Monitor", "List Direct3D11 desktop capture source devices",
+      "Direct3D11 Screen Capture Device Provider",
+      "Source/Monitor", "List Direct3D11 screen capture source devices",
       "Seungha Yang <seungha@centricular.com>");
 }
 
@@ -318,7 +318,9 @@ create_device (const DXGI_ADAPTER_DESC * adapter_desc,
   GstCaps *caps;
   gint width, height, left, top, right, bottom;
   GstStructure *props;
-  std::wstring_convert < std::codecvt_utf8 < wchar_t >, wchar_t >converter;
+  /* *INDENT-OFF* */
+  std::wstring_convert < std::codecvt_utf8 < wchar_t >, wchar_t > converter;
+  /* *INDENT-ON* */
   std::string device_name;
   std::string display_name;
   std::string device_path;

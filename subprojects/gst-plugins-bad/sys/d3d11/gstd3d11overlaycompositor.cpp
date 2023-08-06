@@ -24,6 +24,9 @@
 #include "gstd3d11overlaycompositor.h"
 #include "gstd3d11pluginutils.h"
 #include <wrl.h>
+#include <memory>
+#include <vector>
+#include <algorithm>
 
 GST_DEBUG_CATEGORY_EXTERN (gst_d3d11_overlay_compositor_debug);
 #define GST_CAT_DEFAULT gst_d3d11_overlay_compositor_debug
@@ -57,6 +60,27 @@ static const gchar templ_pixel_shader[] =
     "  return shaderTexture.Sample(samplerState, input.Texture);\n"
     "}\n";
 
+static const gchar templ_premul_pixel_shader[] =
+    "Texture2D shaderTexture;\n"
+    "SamplerState samplerState;\n"
+    "struct PS_INPUT\n"
+    "{\n"
+    "  float4 Position: SV_POSITION;\n"
+    "  float2 Texture: TEXCOORD;\n"
+    "};\n"
+    "float4 main(PS_INPUT input): SV_TARGET\n"
+    "{\n"
+    "  float4 sample = shaderTexture.Sample(samplerState, input.Texture);\n"
+    "  float4 unpremul_sample;\n"
+    "  if (sample.a == 0 || sample.a == 1)\n"
+    "    return sample;\n"
+    "  unpremul_sample.r = saturate (sample.r / sample.a);\n"
+    "  unpremul_sample.g = saturate (sample.g / sample.a);\n"
+    "  unpremul_sample.b = saturate (sample.b / sample.a);\n"
+    "  unpremul_sample.a = sample.a;\n"
+    "  return unpremul_sample;\n"
+    "}\n";
+
 static const gchar templ_vertex_shader[] =
     "struct VS_INPUT\n"
     "{\n"
@@ -74,7 +98,26 @@ static const gchar templ_vertex_shader[] =
     "{\n"
     "  return input;\n"
     "}\n";
-/* *INDENT-ON* */
+
+struct GstD3D11CompositionOverlay
+{
+  ~GstD3D11CompositionOverlay ()
+  {
+    if (overlay_rect)
+      gst_video_overlay_rectangle_unref (overlay_rect);
+    if (d3d11_buffer)
+      gst_buffer_unref (d3d11_buffer);
+  }
+
+  GstVideoOverlayRectangle *overlay_rect = nullptr;
+  ComPtr<ID3D11Texture2D> texture;
+  ComPtr<ID3D11ShaderResourceView> srv;
+  ComPtr<ID3D11Buffer> vertex_buffer;
+  gboolean premul_alpha = FALSE;
+  GstBuffer *d3d11_buffer = nullptr;
+};
+
+typedef std::shared_ptr<GstD3D11CompositionOverlay> GstD3D11CompositionOverlayPtr;
 
 struct _GstD3D11OverlayCompositorPrivate
 {
@@ -82,31 +125,22 @@ struct _GstD3D11OverlayCompositorPrivate
 
   D3D11_VIEWPORT viewport;
 
-  ID3D11PixelShader *ps;
-  ID3D11VertexShader *vs;
-  ID3D11InputLayout *layout;
-  ID3D11SamplerState *sampler;
-  ID3D11BlendState *blend;
-  ID3D11Buffer *index_buffer;
+  ComPtr<ID3D11PixelShader> ps;
+  ComPtr<ID3D11PixelShader> premul_ps;
+  ComPtr<ID3D11VertexShader> vs;
+  ComPtr<ID3D11InputLayout> layout;
+  ComPtr<ID3D11SamplerState> sampler;
+  ComPtr<ID3D11BlendState> blend;
+  ComPtr<ID3D11Buffer> index_buffer;
 
-  /* GstD3D11CompositionOverlay */
-  GList *overlays;
+  std::vector<GstD3D11CompositionOverlayPtr> overlays;
 };
+/* *INDENT-ON* */
 
-typedef struct
-{
-  GstVideoOverlayRectangle *overlay_rect;
-  ID3D11Texture2D *texture;
-  ID3D11ShaderResourceView *srv;
-  ID3D11Buffer *vertex_buffer;
-} GstD3D11CompositionOverlay;
-
-static void gst_d3d11_overlay_compositor_dispose (GObject * object);
-static void
-gst_d3d11_overlay_compositor_free_overlays (GstD3D11OverlayCompositor * self);
+static void gst_d3d11_overlay_compositor_finalize (GObject * object);
 
 #define gst_d3d11_overlay_compositor_parent_class parent_class
-G_DEFINE_TYPE_WITH_PRIVATE (GstD3D11OverlayCompositor,
+G_DEFINE_TYPE (GstD3D11OverlayCompositor,
     gst_d3d11_overlay_compositor, GST_TYPE_OBJECT);
 
 static void
@@ -114,42 +148,32 @@ gst_d3d11_overlay_compositor_class_init (GstD3D11OverlayCompositorClass * klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
-  object_class->dispose = gst_d3d11_overlay_compositor_dispose;
+  object_class->finalize = gst_d3d11_overlay_compositor_finalize;
 }
 
 static void
 gst_d3d11_overlay_compositor_init (GstD3D11OverlayCompositor * self)
 {
-  self->priv = (GstD3D11OverlayCompositorPrivate *)
-      gst_d3d11_overlay_compositor_get_instance_private (self);
+  self->priv = new GstD3D11OverlayCompositorPrivate ();
 }
 
 static void
-gst_d3d11_overlay_compositor_dispose (GObject * object)
+gst_d3d11_overlay_compositor_finalize (GObject * object)
 {
   GstD3D11OverlayCompositor *self = GST_D3D11_OVERLAY_COMPOSITOR (object);
-  GstD3D11OverlayCompositorPrivate *priv = self->priv;
 
-  gst_d3d11_overlay_compositor_free_overlays (self);
-
-  GST_D3D11_CLEAR_COM (priv->ps);
-  GST_D3D11_CLEAR_COM (priv->vs);
-  GST_D3D11_CLEAR_COM (priv->layout);
-  GST_D3D11_CLEAR_COM (priv->sampler);
-  GST_D3D11_CLEAR_COM (priv->blend);
-  GST_D3D11_CLEAR_COM (priv->index_buffer);
+  delete self->priv;
 
   gst_clear_object (&self->device);
 
-  G_OBJECT_CLASS (parent_class)->dispose (object);
+  G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
-static GstD3D11CompositionOverlay *
+static GstD3D11CompositionOverlayPtr
 gst_d3d11_composition_overlay_new (GstD3D11OverlayCompositor * self,
     GstVideoOverlayRectangle * overlay_rect)
 {
   GstD3D11OverlayCompositorPrivate *priv = self->priv;
-  GstD3D11CompositionOverlay *overlay = nullptr;
   gint x, y;
   guint width, height;
   D3D11_SUBRESOURCE_DATA subresource_data;
@@ -172,6 +196,10 @@ gst_d3d11_composition_overlay_new (GstD3D11OverlayCompositor * self,
   ComPtr < ID3D11Texture2D > texture;
   ComPtr < ID3D11ShaderResourceView > srv;
   ComPtr < ID3D11Buffer > vertex_buffer;
+  GstVideoOverlayFormatFlags flags;
+  gboolean premul_alpha = FALSE;
+  GstMemory *mem;
+  gboolean is_d3d11 = FALSE;
 
   memset (&subresource_data, 0, sizeof (subresource_data));
   memset (&texture_desc, 0, sizeof (texture_desc));
@@ -187,58 +215,81 @@ gst_d3d11_composition_overlay_new (GstD3D11OverlayCompositor * self,
     return nullptr;
   }
 
+  flags = gst_video_overlay_rectangle_get_flags (overlay_rect);
+  if ((flags & GST_VIDEO_OVERLAY_FORMAT_FLAG_PREMULTIPLIED_ALPHA) != 0) {
+    premul_alpha = TRUE;
+    flags = GST_VIDEO_OVERLAY_FORMAT_FLAG_PREMULTIPLIED_ALPHA;
+  } else {
+    flags = GST_VIDEO_OVERLAY_FORMAT_FLAG_NONE;
+  }
+
   buf = gst_video_overlay_rectangle_get_pixels_unscaled_argb (overlay_rect,
-      GST_VIDEO_OVERLAY_FORMAT_FLAG_NONE);
+      flags);
   if (!buf) {
     GST_ERROR_OBJECT (self, "Failed to get overlay buffer");
     return nullptr;
   }
 
-  vmeta = gst_buffer_get_video_meta (buf);
-  if (!vmeta) {
-    GST_ERROR_OBJECT (self, "Failed to get video meta");
-    return nullptr;
+  mem = gst_buffer_peek_memory (buf, 0);
+  if (gst_is_d3d11_memory (mem)) {
+    GstD3D11Memory *dmem = GST_D3D11_MEMORY_CAST (mem);
+    if (dmem->device == self->device) {
+      srv = gst_d3d11_memory_get_shader_resource_view (dmem, 0);
+      if (srv) {
+        texture = (ID3D11Texture2D *)
+            gst_d3d11_memory_get_resource_handle (dmem);
+        is_d3d11 = TRUE;
+      }
+    }
   }
 
-  if (!gst_video_meta_map (vmeta,
-          0, &info, (gpointer *) & data, &stride, GST_MAP_READ)) {
-    GST_ERROR_OBJECT (self, "Failed to map");
-    return nullptr;
-  }
+  if (!is_d3d11) {
+    vmeta = gst_buffer_get_video_meta (buf);
+    if (!vmeta) {
+      GST_ERROR_OBJECT (self, "Failed to get video meta");
+      return nullptr;
+    }
 
-  /* Do create texture and upload data at once, for create immutable texture */
-  subresource_data.pSysMem = data;
-  subresource_data.SysMemPitch = stride;
-  subresource_data.SysMemSlicePitch = 0;
+    if (!gst_video_meta_map (vmeta,
+            0, &info, (gpointer *) & data, &stride, GST_MAP_READ)) {
+      GST_ERROR_OBJECT (self, "Failed to map");
+      return nullptr;
+    }
 
-  texture_desc.Width = width;
-  texture_desc.Height = height;
-  texture_desc.MipLevels = 1;
-  texture_desc.ArraySize = 1;
-  texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  texture_desc.SampleDesc.Count = 1;
-  texture_desc.SampleDesc.Quality = 0;
-  texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  texture_desc.CPUAccessFlags = 0;
+    /* Do create texture and upload data at once, for create immutable texture */
+    subresource_data.pSysMem = data;
+    subresource_data.SysMemPitch = stride;
+    subresource_data.SysMemSlicePitch = 0;
 
-  hr = device_handle->CreateTexture2D (&texture_desc,
-      &subresource_data, &texture);
-  gst_video_meta_unmap (vmeta, 0, &info);
+    texture_desc.Width = vmeta->width;
+    texture_desc.Height = vmeta->height;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.SampleDesc.Quality = 0;
+    texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    texture_desc.CPUAccessFlags = 0;
 
-  if (!gst_d3d11_result (hr, device)) {
-    GST_ERROR_OBJECT (self, "Failed to create texture");
-    return nullptr;
-  }
+    hr = device_handle->CreateTexture2D (&texture_desc,
+        &subresource_data, &texture);
+    gst_video_meta_unmap (vmeta, 0, &info);
 
-  srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-  srv_desc.Texture2D.MipLevels = 1;
+    if (!gst_d3d11_result (hr, device)) {
+      GST_ERROR_OBJECT (self, "Failed to create texture");
+      return nullptr;
+    }
 
-  hr = device_handle->CreateShaderResourceView (texture.Get (), &srv_desc,
-      &srv);
-  if (!gst_d3d11_result (hr, device) || !srv) {
-    GST_ERROR_OBJECT (self, "Failed to create shader resource view");
-    return nullptr;
+    srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Texture2D.MipLevels = 1;
+
+    hr = device_handle->CreateShaderResourceView (texture.Get (), &srv_desc,
+        &srv);
+    if (!gst_d3d11_result (hr, device) || !srv) {
+      GST_ERROR_OBJECT (self, "Failed to create shader resource view");
+      return nullptr;
+    }
   }
 
   buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
@@ -309,29 +360,16 @@ gst_d3d11_composition_overlay_new (GstD3D11OverlayCompositor * self,
 
   context_handle->Unmap (vertex_buffer.Get (), 0);
 
-  overlay = g_new0 (GstD3D11CompositionOverlay, 1);
+  auto overlay = std::make_shared < GstD3D11CompositionOverlay > ();
   overlay->overlay_rect = gst_video_overlay_rectangle_ref (overlay_rect);
-  overlay->texture = texture.Detach ();
-  overlay->srv = srv.Detach ();
-  overlay->vertex_buffer = vertex_buffer.Detach ();
+  overlay->texture = texture;
+  overlay->srv = srv;
+  overlay->vertex_buffer = vertex_buffer;
+  overlay->premul_alpha = premul_alpha;
+  if (is_d3d11)
+    overlay->d3d11_buffer = gst_buffer_ref (buf);
 
   return overlay;
-}
-
-static void
-gst_d3d11_composition_overlay_free (GstD3D11CompositionOverlay * overlay)
-{
-  if (!overlay)
-    return;
-
-  if (overlay->overlay_rect)
-    gst_video_overlay_rectangle_unref (overlay->overlay_rect);
-
-  GST_D3D11_CLEAR_COM (overlay->srv);
-  GST_D3D11_CLEAR_COM (overlay->texture);
-  GST_D3D11_CLEAR_COM (overlay->vertex_buffer);
-
-  g_free (overlay);
 }
 
 static gboolean
@@ -350,6 +388,7 @@ gst_d3d11_overlay_compositor_setup_shader (GstD3D11OverlayCompositor * self)
   ID3D11Device *device_handle;
   ID3D11DeviceContext *context_handle;
   ComPtr < ID3D11PixelShader > ps;
+  ComPtr < ID3D11PixelShader > premul_ps;
   ComPtr < ID3D11VertexShader > vs;
   ComPtr < ID3D11InputLayout > layout;
   ComPtr < ID3D11SamplerState > sampler;
@@ -384,6 +423,13 @@ gst_d3d11_overlay_compositor_setup_shader (GstD3D11OverlayCompositor * self)
       templ_pixel_shader, "main", &ps);
   if (!gst_d3d11_result (hr, device)) {
     GST_ERROR_OBJECT (self, "Couldn't create pixel shader");
+    return FALSE;
+  }
+
+  hr = gst_d3d11_create_pixel_shader_simple (device,
+      templ_premul_pixel_shader, "main", &premul_ps);
+  if (!gst_d3d11_result (hr, device)) {
+    GST_ERROR_OBJECT (self, "Couldn't create premul pixel shader");
     return FALSE;
   }
 
@@ -463,12 +509,13 @@ gst_d3d11_overlay_compositor_setup_shader (GstD3D11OverlayCompositor * self)
 
   context_handle->Unmap (index_buffer.Get (), 0);
 
-  priv->ps = ps.Detach ();
-  priv->vs = vs.Detach ();
-  priv->layout = layout.Detach ();
-  priv->sampler = sampler.Detach ();
-  priv->blend = blend.Detach ();
-  priv->index_buffer = index_buffer.Detach ();
+  priv->ps = ps;
+  priv->premul_ps = premul_ps;
+  priv->vs = vs;
+  priv->layout = layout;
+  priv->sampler = sampler;
+  priv->blend = blend;
+  priv->index_buffer = index_buffer;
 
   priv->viewport.TopLeftX = 0;
   priv->viewport.TopLeftY = 0;
@@ -506,39 +553,27 @@ gst_d3d11_overlay_compositor_new (GstD3D11Device * device,
   return self;
 }
 
-static void
-gst_d3d11_overlay_compositor_free_overlays (GstD3D11OverlayCompositor * self)
-{
-  GstD3D11OverlayCompositorPrivate *priv = self->priv;
-
-  if (priv->overlays) {
-    g_list_free_full (priv->overlays,
-        (GDestroyNotify) gst_d3d11_composition_overlay_free);
-
-    priv->overlays = nullptr;
-  }
-}
-
-static gint
-find_in_compositor (const GstD3D11CompositionOverlay * overlay,
-    const GstVideoOverlayRectangle * rect)
-{
-  return !(overlay->overlay_rect == rect);
-}
-
 static gboolean
-is_in_video_overlay_composition (GstVideoOverlayComposition * voc,
-    GstD3D11CompositionOverlay * overlay)
+gst_d3d11_overlay_compositor_foreach_meta (GstBuffer * buffer, GstMeta ** meta,
+    std::vector < GstVideoOverlayRectangle * >*overlay_rect)
 {
-  guint i;
+  GstVideoOverlayCompositionMeta *cmeta;
+  guint num_rect;
 
-  for (i = 0; i < gst_video_overlay_composition_n_rectangles (voc); i++) {
-    GstVideoOverlayRectangle *rectangle =
-        gst_video_overlay_composition_get_rectangle (voc, i);
-    if (overlay->overlay_rect == rectangle)
-      return TRUE;
+  if ((*meta)->info->api != GST_VIDEO_OVERLAY_COMPOSITION_META_API_TYPE)
+    return TRUE;
+
+  cmeta = (GstVideoOverlayCompositionMeta *) (*meta);
+  if (!cmeta->overlay)
+    return TRUE;
+
+  num_rect = gst_video_overlay_composition_n_rectangles (cmeta->overlay);
+  for (guint i = 0; i < num_rect; i++) {
+    auto rect = gst_video_overlay_composition_get_rectangle (cmeta->overlay, i);
+    overlay_rect->push_back (rect);
   }
-  return FALSE;
+
+  return TRUE;
 }
 
 gboolean
@@ -546,61 +581,64 @@ gst_d3d11_overlay_compositor_upload (GstD3D11OverlayCompositor * compositor,
     GstBuffer * buf)
 {
   GstD3D11OverlayCompositorPrivate *priv;
-  GstVideoOverlayCompositionMeta *meta;
-  gint i, num_overlays;
-  GList *iter;
+  std::vector < GstVideoOverlayRectangle * >new_overlay_rect;
 
   g_return_val_if_fail (compositor != nullptr, FALSE);
   g_return_val_if_fail (GST_IS_BUFFER (buf), FALSE);
 
   priv = compositor->priv;
 
-  meta = gst_buffer_get_video_overlay_composition_meta (buf);
-  if (!meta) {
-    gst_d3d11_overlay_compositor_free_overlays (compositor);
+  gst_buffer_foreach_meta (buf,
+      (GstBufferForeachMetaFunc) gst_d3d11_overlay_compositor_foreach_meta,
+      &new_overlay_rect);
+
+  if (new_overlay_rect.empty ()) {
+    priv->overlays.clear ();
     return TRUE;
   }
 
-  num_overlays = gst_video_overlay_composition_n_rectangles (meta->overlay);
-  if (!num_overlays) {
-    gst_d3d11_overlay_compositor_free_overlays (compositor);
-    return TRUE;
-  }
+  GST_LOG_OBJECT (compositor, "Found %" G_GSIZE_FORMAT
+      " overlay rectangles, %" G_GSIZE_FORMAT " in current queue",
+      new_overlay_rect.size (), priv->overlays.size ());
 
-  GST_LOG_OBJECT (compositor, "Upload %d overlay rectangles", num_overlays);
-
-  /* Upload new overlay */
-  for (i = 0; i < num_overlays; i++) {
-    GstVideoOverlayRectangle *rectangle =
-        gst_video_overlay_composition_get_rectangle (meta->overlay, i);
-
-    if (!g_list_find_custom (priv->overlays,
-            rectangle, (GCompareFunc) find_in_compositor)) {
-      GstD3D11CompositionOverlay *overlay = nullptr;
-
-      overlay = gst_d3d11_composition_overlay_new (compositor, rectangle);
-
-      if (!overlay)
+  /* *INDENT-OFF* */
+  for (auto it : new_overlay_rect) {
+    if (std::find_if (priv->overlays.begin (), priv->overlays.end (),
+          [&] (const auto & overlay) -> bool {
+            return overlay->overlay_rect == it;
+           }) == priv->overlays.end ()) {
+      auto new_overlay = gst_d3d11_composition_overlay_new (compositor, it);
+      if (!new_overlay)
         return FALSE;
 
-      priv->overlays = g_list_append (priv->overlays, overlay);
+      priv->overlays.push_back (new_overlay);
     }
   }
+  /* *INDENT-ON* */
+
+  GST_LOG_OBJECT (compositor, "Overlay rectangles in queue after uploaded %"
+      G_GSIZE_FORMAT, priv->overlays.size ());
 
   /* Remove old overlay */
-  iter = priv->overlays;
-  while (iter) {
-    GstD3D11CompositionOverlay *overlay =
-        (GstD3D11CompositionOverlay *) iter->data;
-    GList *next = iter->next;
-
-    if (!is_in_video_overlay_composition (meta->overlay, overlay)) {
-      priv->overlays = g_list_delete_link (priv->overlays, iter);
-      gst_d3d11_composition_overlay_free (overlay);
+  /* *INDENT-OFF* */
+  auto it = priv->overlays.begin ();
+  while (it != priv->overlays.end ()) {
+    auto old_overlay = *it;
+    if (std::find_if (new_overlay_rect.begin (), new_overlay_rect.end (),
+          [&] (const auto & overlay) -> bool {
+            return overlay == old_overlay->overlay_rect;
+          }) == new_overlay_rect.end ()) {
+      GST_LOG_OBJECT (compositor, "Removing %p from queue",
+          old_overlay->overlay_rect);
+      it = priv->overlays.erase (it);
+    } else {
+      it++;
     }
-
-    iter = next;
   }
+  /* *INDENT-ON* */
+
+  GST_LOG_OBJECT (compositor, "Final queue size %" G_GSIZE_FORMAT,
+      priv->overlays.size ());
 
   return TRUE;
 }
@@ -633,41 +671,59 @@ gst_d3d11_overlay_compositor_draw_unlocked (GstD3D11OverlayCompositor *
     compositor, ID3D11RenderTargetView * rtv[GST_VIDEO_MAX_PLANES])
 {
   GstD3D11OverlayCompositorPrivate *priv;
-  GList *iter;
   ID3D11DeviceContext *context;
   ID3D11ShaderResourceView *clear_view[GST_VIDEO_MAX_PLANES] = { nullptr, };
   UINT strides = sizeof (VertexData);
   UINT offsets = 0;
+  ID3D11SamplerState *samplers[1];
 
   g_return_val_if_fail (compositor != nullptr, FALSE);
   g_return_val_if_fail (rtv != nullptr, FALSE);
 
   priv = compositor->priv;
 
-  if (!priv->overlays)
+  if (priv->overlays.empty ())
     return TRUE;
+
+  samplers[0] = priv->sampler.Get ();
 
   context = gst_d3d11_device_get_device_context_handle (compositor->device);
   context->IASetPrimitiveTopology (D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  context->IASetInputLayout (priv->layout);
-  context->IASetIndexBuffer (priv->index_buffer, DXGI_FORMAT_R16_UINT, 0);
-  context->PSSetSamplers (0, 1, &priv->sampler);
-  context->VSSetShader (priv->vs, nullptr, 0);
-  context->PSSetShader (priv->ps, nullptr, 0);
+  context->IASetInputLayout (priv->layout.Get ());
+  context->IASetIndexBuffer (priv->index_buffer.Get (),
+      DXGI_FORMAT_R16_UINT, 0);
+  context->PSSetSamplers (0, 1, samplers);
+  context->VSSetShader (priv->vs.Get (), nullptr, 0);
   context->RSSetViewports (1, &priv->viewport);
   context->OMSetRenderTargets (1, rtv, nullptr);
-  context->OMSetBlendState (priv->blend, nullptr, 0xffffffff);
+  context->OMSetBlendState (priv->blend.Get (), nullptr, 0xffffffff);
 
-  for (iter = priv->overlays; iter; iter = g_list_next (iter)) {
-    GstD3D11CompositionOverlay *overlay =
-        (GstD3D11CompositionOverlay *) iter->data;
+  /* *INDENT-OFF* */
+  for (auto overlay : priv->overlays) {
+    ID3D11ShaderResourceView *srv[] = { overlay->srv.Get () };
+    ID3D11Buffer *vertex_buf[] = { overlay->vertex_buffer.Get () };
+    GstMapInfo info;
+    GstMemory *mem = nullptr;
 
-    context->PSSetShaderResources (0, 1, &overlay->srv);
-    context->IASetVertexBuffers (0,
-        1, &overlay->vertex_buffer, &strides, &offsets);
+    if (overlay->d3d11_buffer) {
+      mem = gst_buffer_peek_memory (overlay->d3d11_buffer, 0);
+      gst_memory_map (mem, &info, (GstMapFlags) (GST_MAP_D3D11 | GST_MAP_READ));
+    }
+
+    if (overlay->premul_alpha)
+      context->PSSetShader (priv->premul_ps.Get (), nullptr, 0);
+    else
+      context->PSSetShader (priv->ps.Get (), nullptr, 0);
+
+    context->PSSetShaderResources (0, 1, srv);
+    context->IASetVertexBuffers (0, 1, vertex_buf, &strides, &offsets);
 
     context->DrawIndexed (6, 0, 0);
+
+    if (mem)
+      gst_memory_unmap (mem, &info);
   }
+  /* *INDENT-ON* */
 
   context->PSSetShaderResources (0, 1, clear_view);
   context->OMSetRenderTargets (0, nullptr, nullptr);

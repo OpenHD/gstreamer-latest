@@ -446,7 +446,7 @@ gst_v4l2_codec_h265_dec_decide_allocation (GstVideoDecoder * decoder,
   guint min = 0;
 
   if (self->streaming)
-    return TRUE;
+    goto no_internal_changes;
 
   self->has_videometa = gst_query_find_allocation_meta (query,
       GST_VIDEO_META_API_TYPE, NULL);
@@ -465,6 +465,7 @@ gst_v4l2_codec_h265_dec_decide_allocation (GstVideoDecoder * decoder,
       GST_PAD_SRC, self->min_pool_size + min + 1);
   self->src_pool = gst_v4l2_codec_pool_new (self->src_allocator, &self->vinfo);
 
+no_internal_changes:
   /* Our buffer pool is internal, we will let the base class create a video
    * pool, and use it if we are running out of buffers or if downstream does
    * not support GstVideoMeta */
@@ -988,6 +989,7 @@ gst_v4l2_codec_h265_dec_fill_decode_params (GstV4l2CodecH265Dec * self,
     .num_poc_st_curr_before = decoder->NumPocStCurrBefore,
     .num_poc_st_curr_after = decoder->NumPocStCurrAfter,
     .num_poc_lt_curr = decoder->NumPocLtCurr,
+    .num_delta_pocs_of_ref_rps_idx = slice->header.short_term_ref_pic_sets.NumDeltaPocsOfRefRpsIdx,
     .flags =
       (GST_H265_IS_NAL_TYPE_IRAP (slice->nalu.type) ? V4L2_HEVC_DECODE_PARAM_FLAG_IRAP_PIC : 0) |
       (GST_H265_IS_NAL_TYPE_IDR (slice->nalu.type) ? V4L2_HEVC_DECODE_PARAM_FLAG_IDR_PIC : 0) |

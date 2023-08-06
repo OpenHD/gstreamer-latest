@@ -119,6 +119,7 @@ gst_av1_decoder_init (GstAV1Decoder * self)
   GstAV1DecoderPrivate *priv;
 
   gst_video_decoder_set_packetized (GST_VIDEO_DECODER (self), TRUE);
+  gst_video_decoder_set_needs_format (GST_VIDEO_DECODER (self), TRUE);
 
   self->priv = priv = gst_av1_decoder_get_instance_private (self);
 
@@ -408,7 +409,8 @@ gst_av1_decoder_process_sequence (GstAV1Decoder * self, GstAV1OBU * obu)
   }
 
   ret = klass->new_sequence (self, &seq_header,
-      GST_AV1_TOTAL_REFS_PER_FRAME + priv->preferred_output_delay);
+      /* +1 for the current frame */
+      GST_AV1_TOTAL_REFS_PER_FRAME + 1 + priv->preferred_output_delay);
   if (ret != GST_FLOW_OK) {
     GST_ERROR_OBJECT (self, "subclass does not want accept new sequence");
     return ret;
@@ -674,6 +676,7 @@ gst_av1_decoder_handle_frame (GstVideoDecoder * decoder,
   GstBuffer *in_buf = frame->input_buffer;
   GstMapInfo map;
   GstFlowReturn ret = GST_FLOW_OK;
+  GstFlowReturn output_ret = GST_FLOW_OK;
   guint32 total_consumed, consumed;
   GstAV1OBU obu;
   GstAV1ParserResult res;
@@ -779,13 +782,20 @@ out:
     if (priv->current_picture)
       gst_av1_picture_unref (priv->current_picture);
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
   }
 
-  gst_av1_decoder_drain_output_queue (self, priv->preferred_output_delay, &ret);
+  gst_av1_decoder_drain_output_queue (self,
+      priv->preferred_output_delay, &output_ret);
 
   priv->current_picture = NULL;
   priv->current_frame = NULL;
+
+  if (output_ret != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Output returned %s", gst_flow_get_name (output_ret));
+    return output_ret;
+  }
 
   if (ret == GST_FLOW_ERROR) {
     GST_VIDEO_DECODER_ERROR (decoder, 1, STREAM, DECODE,

@@ -224,6 +224,7 @@ enum
 #define DEFAULT_NTP_TIME_SOURCE      GST_RTP_NTP_TIME_SOURCE_NTP
 #define DEFAULT_RTCP_SYNC_SEND_TIME  TRUE
 #define DEFAULT_UPDATE_NTP64_HEADER_EXT  TRUE
+#define DEFAULT_TIMEOUT_INACTIVE_SOURCES TRUE
 
 enum
 {
@@ -246,7 +247,8 @@ enum
   PROP_RTP_PROFILE,
   PROP_NTP_TIME_SOURCE,
   PROP_RTCP_SYNC_SEND_TIME,
-  PROP_UPDATE_NTP64_HEADER_EXT
+  PROP_UPDATE_NTP64_HEADER_EXT,
+  PROP_TIMEOUT_INACTIVE_SOURCES,
 };
 
 #define GST_RTP_SESSION_LOCK(sess)   g_mutex_lock (&(sess)->priv->lock)
@@ -289,6 +291,8 @@ struct _GstRtpSessionPrivate
    * pushed a buffer list.
    */
   GstBufferList *processed_list;
+
+  gboolean send_rtp_sink_eos;
 };
 
 /* callbacks to handle actions from the session manager */
@@ -828,6 +832,22 @@ gst_rtp_session_class_init (GstRtpSessionClass * klass)
           DEFAULT_UPDATE_NTP64_HEADER_EXT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstRtpSession:timeout-inactive-sources:
+   *
+   * Whether inactive sources should be timed out
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class,
+      PROP_TIMEOUT_INACTIVE_SOURCES,
+      g_param_spec_boolean ("timeout-inactive-sources",
+          "Time out inactive sources",
+          "Whether sources that don't receive RTP or RTCP packets for longer "
+          "than 5x RTCP interval should be removed",
+          DEFAULT_TIMEOUT_INACTIVE_SOURCES,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_rtp_session_change_state);
   gstelement_class->request_new_pad =
@@ -925,6 +945,8 @@ gst_rtp_session_init (GstRtpSession * rtpsession)
   rtpsession->priv->sent_rtx_req_count = 0;
 
   rtpsession->priv->ntp_time_source = DEFAULT_NTP_TIME_SOURCE;
+
+  rtpsession->priv->send_rtp_sink_eos = FALSE;
 }
 
 static void
@@ -1003,6 +1025,10 @@ gst_rtp_session_set_property (GObject * object, guint prop_id,
     case PROP_UPDATE_NTP64_HEADER_EXT:
       g_object_set_property (G_OBJECT (priv->session),
           "update-ntp64-header-ext", value);
+      break;
+    case PROP_TIMEOUT_INACTIVE_SOURCES:
+      g_object_set_property (G_OBJECT (priv->session),
+          "timeout-inactive-sources", value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1086,6 +1112,10 @@ gst_rtp_session_get_property (GObject * object, guint prop_id,
     case PROP_UPDATE_NTP64_HEADER_EXT:
       g_object_get_property (G_OBJECT (priv->session),
           "update-ntp64-header-ext", value);
+      break;
+    case PROP_TIMEOUT_INACTIVE_SOURCES:
+      g_object_get_property (G_OBJECT (priv->session),
+          "timeout-inactive-sources", value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1343,6 +1373,9 @@ gst_rtp_session_change_state (GstElement * element, GstStateChange transition)
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      GST_RTP_SESSION_LOCK (rtpsession);
+      rtpsession->priv->send_rtp_sink_eos = FALSE;
+      GST_RTP_SESSION_UNLOCK (rtpsession);
       /* no need to join yet, we might want to continue later. Also, the
        * dataflow could block downstream so that a join could just block
        * forever. */
@@ -1545,9 +1578,12 @@ gst_rtp_session_send_rtcp (RTPSession * sess, RTPSource * src,
 
     /* Forward send an EOS on the RTCP sink if we received an EOS on the
      * send_rtp_sink. We don't need to check the recv_rtp_sink since in this
-     * case the EOS event would already have been sent */
-    if (all_sources_bye && rtpsession->send_rtp_sink &&
-        GST_PAD_IS_EOS (rtpsession->send_rtp_sink)) {
+     * case the EOS event would already have been sent. Also, prevent a
+     * race condition between the EOS event handling and rtcp send
+     * function/thread  by using send_rtp_sink_eos directly instead of
+     * GST_PAD_IS_EOS*/
+    GST_RTP_SESSION_LOCK (rtpsession);
+    if (all_sources_bye && rtpsession->priv->send_rtp_sink_eos) {
       GstEvent *event;
 
       GST_LOG_OBJECT (rtpsession, "sending EOS");
@@ -1556,6 +1592,7 @@ gst_rtp_session_send_rtcp (RTPSession * sess, RTPSource * src,
       gst_event_set_seqnum (event, rtpsession->recv_rtcp_segment_seqnum);
       gst_pad_push_event (rtcp_src, event);
     }
+    GST_RTP_SESSION_UNLOCK (rtpsession);
     gst_object_unref (rtcp_src);
   } else {
     GST_RTP_SESSION_UNLOCK (rtpsession);
@@ -1754,6 +1791,9 @@ gst_rtp_session_event_recv_rtp_sink (GstPad * pad, GstObject * parent,
       gst_segment_init (&rtpsession->recv_rtp_seg, GST_FORMAT_UNDEFINED);
       rtpsession->recv_rtcp_segment_seqnum = GST_SEQNUM_INVALID;
       ret = gst_pad_push_event (rtpsession->recv_rtp_src, event);
+      GST_RTP_SESSION_LOCK (rtpsession);
+      rtpsession->priv->send_rtp_sink_eos = FALSE;
+      GST_RTP_SESSION_UNLOCK (rtpsession);
       break;
     case GST_EVENT_SEGMENT:
     {
@@ -2253,6 +2293,9 @@ gst_rtp_session_event_send_rtp_sink (GstPad * pad, GstObject * parent,
        * because we stop sending. */
       ret = gst_pad_push_event (rtpsession->send_rtp_src, event);
       current_time = gst_clock_get_time (rtpsession->priv->sysclock);
+      GST_RTP_SESSION_LOCK (rtpsession);
+      rtpsession->priv->send_rtp_sink_eos = TRUE;
+      GST_RTP_SESSION_UNLOCK (rtpsession);
 
       GST_DEBUG_OBJECT (rtpsession, "scheduling BYE message");
       rtp_session_mark_all_bye (rtpsession->priv->session, "End Of Stream");

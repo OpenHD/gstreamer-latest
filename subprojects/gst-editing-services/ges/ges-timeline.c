@@ -1656,7 +1656,7 @@ clip_track_element_added_cb (GESClip * clip,
 
   if (auto_trans_track) {
     /* don't use track-selection */
-    success = ! !ges_clip_add_child_to_track (clip, track_element,
+    success = !!ges_clip_add_child_to_track (clip, track_element,
         auto_trans_track, &error);
     gst_object_unref (auto_trans_track);
   } else {
@@ -2157,6 +2157,12 @@ gboolean
 ges_timeline_get_smart_rendering (GESTimeline * timeline)
 {
   return timeline->priv->rendering_smartly;
+}
+
+GstStreamCollection *
+ges_timeline_get_stream_collection (GESTimeline * timeline)
+{
+  return gst_object_ref (timeline->priv->stream_collection);
 }
 
 /**** API *****/

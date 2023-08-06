@@ -24,6 +24,7 @@
 #include <gst/va/gstvavideoformat.h>
 
 #include "gstvacaps.h"
+#include "gstvapluginutils.h"
 
 #define GST_CAT_DEFAULT (base->debug_category)
 #define GST_VA_BASE_DEC_GET_PARENT_CLASS(obj) (GST_VA_BASE_DEC_GET_CLASS(obj)->parent_decoder_class)
@@ -33,14 +34,17 @@ gst_va_base_dec_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec)
 {
   GstVaBaseDec *self = GST_VA_BASE_DEC (object);
+  GstVaBaseDecClass *klass = GST_VA_BASE_DEC_GET_CLASS (self);
 
   switch (prop_id) {
     case GST_VA_DEC_PROP_DEVICE_PATH:{
-      if (!(self->display && GST_IS_VA_DISPLAY_DRM (self->display))) {
+      if (!self->display)
+        g_value_set_string (value, klass->render_device_path);
+      else if (GST_IS_VA_DISPLAY_PLATFORM (self->display))
+        g_object_get_property (G_OBJECT (self->display), "path", value);
+      else
         g_value_set_string (value, NULL);
-        return;
-      }
-      g_object_get_property (G_OBJECT (self->display), "path", value);
+
       break;
     }
     default:
@@ -747,7 +751,8 @@ gst_va_base_dec_class_init (GstVaBaseDecClass * klass, GstVaCodecs codec,
 
   g_object_class_install_property (object_class, GST_VA_DEC_PROP_DEVICE_PATH,
       g_param_spec_string ("device-path", "Device Path",
-          "DRM device path", NULL, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+          GST_VA_DEVICE_PATH_PROP_DESC, NULL, GST_PARAM_DOC_SHOW_DEFAULT |
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 }
 
 /* XXX: if chroma has not an available format, the first format is
@@ -793,6 +798,7 @@ _caps_video_format_from_chroma (GstCaps * caps, GstCapsFeatures * features,
   GstCapsFeatures *feats;
   GstStructure *structure;
   const GValue *format;
+  GstVideoFormat fmt, ret_fmt = GST_VIDEO_FORMAT_UNKNOWN;
 
   num_structures = gst_caps_get_size (caps);
   for (i = 0; i < num_structures; i++) {
@@ -801,10 +807,23 @@ _caps_video_format_from_chroma (GstCaps * caps, GstCapsFeatures * features,
       continue;
     structure = gst_caps_get_structure (caps, i);
     format = gst_structure_get_value (structure, "format");
-    return _find_video_format_from_chroma (format, chroma_type);
+
+    fmt = _find_video_format_from_chroma (format, chroma_type);
+    if (fmt == GST_VIDEO_FORMAT_UNKNOWN)
+      continue;
+
+    /* Record the first valid format as the fallback if we can
+       not find a better one. */
+    if (ret_fmt == GST_VIDEO_FORMAT_UNKNOWN)
+      ret_fmt = fmt;
+
+    if (gst_va_chroma_from_video_format (fmt) == chroma_type) {
+      ret_fmt = fmt;
+      break;
+    }
   }
 
-  return GST_VIDEO_FORMAT_UNKNOWN;
+  return ret_fmt;
 }
 
 static GstVideoFormat

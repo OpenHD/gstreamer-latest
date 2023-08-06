@@ -51,11 +51,12 @@ struct _GstWaylandSink
   GstWlDisplay *display;
   GstWlWindow *window;
   GstBufferPool *pool;
-  gboolean use_dmabuf;
 
   gboolean video_info_changed;
   GstVideoInfo video_info;
+  GstVideoInfoDmaDrm drm_info;
   gboolean fullscreen;
+  GstCaps *caps;
 
   gchar *display_name;
 
@@ -68,6 +69,9 @@ struct _GstWaylandSink
   GstVideoOrientationMethod current_rotate_method;
 
   struct wl_callback *callback;
+
+  gchar *drm_device;
+  gboolean skip_dumb_buffer_copy;
 };
 
 struct _GstWaylandSinkClass

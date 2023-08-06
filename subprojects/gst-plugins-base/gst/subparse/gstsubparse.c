@@ -95,8 +95,6 @@ G_DEFINE_TYPE (GstSubParse, gst_sub_parse, GST_TYPE_ELEMENT);
 
 GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (subparse, "subparse",
     GST_RANK_PRIMARY, GST_TYPE_SUBPARSE, sub_parse_element_init (plugin))
-
-
      static void gst_sub_parse_dispose (GObject * object)
 {
   GstSubParse *subparse = GST_SUBPARSE (object);
@@ -610,8 +608,7 @@ parse_mdvdsub (ParserState * state, const gchar * line)
       break;
     }
   }
-  ret = markup->str;
-  g_string_free (markup, FALSE);
+  ret = g_string_free (markup, FALSE);
   GST_DEBUG ("parse_mdvdsub returning (%f+%f): %s",
       state->start_time / (double) GST_SECOND,
       state->duration / (double) GST_SECOND, ret);
@@ -779,7 +776,7 @@ subrip_fix_up_markup (gchar ** p_txt, gconstpointer allowed_tags_ptr)
     }
 
     if (*next_tag == '<' && *(next_tag + 1) == '/') {
-      end_tag = strchr (cur, '>');
+      end_tag = strchr (next_tag, '>');
       if (end_tag) {
         const gchar *last = NULL;
         if (num_open_tags > 0)
@@ -794,6 +791,8 @@ subrip_fix_up_markup (gchar ** p_txt, gconstpointer allowed_tags_ptr)
         } else {
           --num_open_tags;
           g_ptr_array_remove_index (open_tags, num_open_tags);
+          cur = end_tag + 1;
+          continue;
         }
       }
     }

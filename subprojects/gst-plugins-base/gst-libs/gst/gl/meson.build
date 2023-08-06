@@ -3,6 +3,7 @@ gstglproto_dep = dependency('', required : false)
 gstglx11_dep = dependency('', required : false)
 gstglwayland_dep = dependency('', required : false)
 gstglegl_dep = dependency('', required : false)
+gstglviv_fb_dep = dependency('', required : false)
 
 if get_option('gl').disabled()
   message('GStreamer OpenGL integration disabled via options.')
@@ -14,6 +15,7 @@ gl_sources = files([
   'gstglapi.c',
   'gstglbasefilter.c',
   'gstglbasememory.c',
+  'gstglbasemixer.c',
   'gstglbasesrc.c',
   'gstglcolorconvert.c',
   'gstglbuffer.c',
@@ -29,6 +31,7 @@ gl_sources = files([
   'gstglframebuffer.c',
   'gstglmemory.c',
   'gstglmemorypbo.c',
+  'gstglmixer.c',
   'gstgloverlaycompositor.c',
   'gstglquery.c',
   'gstglrenderbuffer.c',
@@ -53,6 +56,7 @@ gir_gl_headers = files([
   'gstglapi.h',
   'gstglbasefilter.h',
   'gstglbasememory.h',
+  'gstglbasemixer.h',
   'gstglbasesrc.h',
   'gstglbuffer.h',
   'gstglbufferpool.h',
@@ -67,6 +71,7 @@ gir_gl_headers = files([
   'gstglframebuffer.h',
   'gstglmemory.h',
   'gstglmemorypbo.h',
+  'gstglmixer.h',
   'gstgloverlaycompositor.h',
   'gstglquery.h',
   'gstglrenderbuffer.h',
@@ -111,6 +116,8 @@ gl_wayland_sources = []
 gl_wayland_headers = []
 gl_egl_sources = []
 gl_egl_headers = []
+gl_viv_fb_sources = []
+gl_viv_fb_headers = []
 
 glconf = configuration_data()
 glconf_options = [
@@ -896,7 +903,7 @@ if need_win_gbm != 'no'
     endif
   endif
 
-  gbm_gudev_dep = dependency('gudev-1.0', version : '>=147', required : false)
+  gbm_gudev_dep = dependency('gudev-1.0', version : '>=147', required : false, allow_fallback: true)
   gbm_libdrm_dep = dependency('libdrm', version : '>= 2.4.55', required : false)
   gbm_dep = dependency('gbm', required : false)
   if egl_dep.found() and gbm_gudev_dep.found() and gbm_libdrm_dep.found() and gbm_dep.found()
@@ -918,18 +925,27 @@ if need_win_gbm != 'no'
   endif
 endif
 
+if cc.has_function ('glTexDirectVIV', dependencies : gles2_dep)
+  glconf.set('GST_GL_HAVE_VIV_DIRECTVIV', 1)
+endif
+
 if need_platform_egl != 'no' and need_win_viv_fb != 'no'
   if egl_dep.found() and cc.has_function ('fbGetDisplay', dependencies : egl_dep)
-    if cc.has_function ('glTexDirectVIV', dependencies : gles2_dep)
-      enabled_gl_winsys += 'viv-fb'
-      glconf.set('GST_GL_HAVE_WINDOW_VIV_FB', 1)
-      glconf.set('GST_GL_HAVE_VIV_DIRECTVIV', 1)
-      gl_priv_sources += [
-        'viv-fb/gstgldisplay_viv_fb.c',
-        'viv-fb/gstglwindow_viv_fb_egl.c',
-      ]
-      gl_cpp_args += ['-DEGL_API_FB']
-    endif
+    enabled_gl_winsys += 'viv-fb'
+    glconf.set('GST_GL_HAVE_WINDOW_VIV_FB', 1)
+    gl_priv_sources += files([
+      'viv-fb/gstgldisplay_viv_fb.c',
+      'viv-fb/gstglwindow_viv_fb_egl.c',
+    ])
+    gl_viv_fb_sources += files([
+      'viv-fb/gstgldisplay_viv_fb.c',
+    ])
+
+    gl_cpp_args += ['-DEGL_API_FB']
+    gl_viv_fb_headers = files([
+      'viv-fb/gstglviv-fb.h',
+      'viv-fb/gstgldisplay_viv_fb.h',
+    ])
   endif
 endif
 
@@ -1051,7 +1067,7 @@ if build_gstgl
   common_args += '-I@0@'.format(meson.current_build_dir())
 
   gstgl = library('gstgl-' + api_version,
-    gl_sources, gl_egl_sources, gl_x11_sources, gl_wayland_sources, gl_priv_sources, gl_enumtypes_c, gl_enumtypes_h,
+    gl_sources, gl_egl_sources, gl_x11_sources, gl_wayland_sources, gl_viv_fb_sources, gl_priv_sources, gl_enumtypes_c, gl_enumtypes_h,
     c_args : common_args,
     cpp_args : common_args,
     objc_args : common_args + gl_objc_args,
@@ -1111,6 +1127,8 @@ if build_gstgl
     library_def += {'gir': [gir]}
     if not static_build
       gl_gir = gnome.generate_gir(gstgl, kwargs: gir)
+      library_def += {'gir_targets':  library_def.get('gir_targets', []) + [gl_gir]}
+      library_def += {'gir': [gir]}
       gen_sources += [gl_gir]
     endif
   endif
@@ -1156,6 +1174,7 @@ if build_gstgl
       if not static_build
         gir += {'includes': gir['includes'] + [gl_gir[0]]}
         gl_x11_gir = gnome.generate_gir(gstgl, kwargs: gir)
+        library_def += {'gir_targets':  library_def.get('gir_targets', []) + [gl_x11_gir]}
       endif
     endif
     gstglx11_dep = declare_dependency(dependencies : [gstgl_dep, x11_dep, xcb_dep],
@@ -1193,6 +1212,7 @@ if build_gstgl
       if not static_build
         gir += {'includes': gir['includes'] + [gl_gir[0]]}
         gl_wayland_gir = gnome.generate_gir(gstgl, kwargs: gir)
+        library_def += {'gir_targets':  library_def.get('gir_targets', []) + [gl_wayland_gir]}
       endif
     endif
     gstglwayland_dep = declare_dependency(dependencies : [gstgl_dep],
@@ -1228,11 +1248,48 @@ if build_gstgl
       if not static_build
         gir += {'includes': gir['includes'] + [gl_gir[0]]}
         gl_egl_gir = gnome.generate_gir(gstgl, kwargs: gir)
+        library_def += {'gir_targets':  library_def.get('gir_targets', []) + [gl_egl_gir]}
       endif
     endif
     gstglegl_dep = declare_dependency(dependencies : [gstgl_dep],
       sources : gl_egl_gir)
     meson.override_dependency(pkg_name, gstglegl_dep)
+  endif
+
+  if gl_viv_fb_headers.length() > 0
+    install_headers(gl_viv_fb_headers, subdir : 'gstreamer-1.0/gst/gl/viv-fb')
+    pkg_name = 'gstreamer-gl-viv-fb-1.0'
+    pkgconfig.generate(
+      libraries : [gstgl],
+      subdirs : pkgconfig_subdirs,
+      name : pkg_name,
+      description : 'Streaming media framework, OpenGL plugins libraries (Vivante Framebuffer specifics)',
+    )
+    gl_viv_fb_gir = []
+    if build_gir
+      gir = {
+        'sources' : gl_viv_fb_sources + gl_viv_fb_headers,
+        'namespace' : 'GstGLVivFB',
+        'nsversion' : api_version,
+        'identifier_prefix' : 'Gst',
+        'symbol_prefix' : 'gst',
+        'export_packages' : pkg_name,
+        'includes' : ['Gst-1.0', 'GstBase-1.0', 'GstVideo-1.0'],
+        'install' : true,
+        'extra_args' : gir_init_section + ['--c-include=gst/gl/viv-fb/gstglviv-fb.h'],
+        'dependencies' : [video_dep, gst_dep, gst_base_dep]
+      }
+      gir_dict = gir + {'includes': gir['includes'] + ['GstGL-1.0']}
+      gst_libraries += [[pkg_name, {'gir': gir_dict}]]
+      if not static_build
+        gir += {'includes': gir['includes'] + [gl_gir[0]]}
+        gl_viv_fb_gir = gnome.generate_gir(gstgl, kwargs: gir)
+        library_def += {'gir_targets':  library_def.get('gir_targets', []) + [gl_viv_fb_gir]}
+      endif
+    endif
+    gstglviv_fb_dep = declare_dependency(dependencies : [gstgl_dep],
+      sources : gl_viv_fb_gir)
+    meson.override_dependency(pkg_name, gstglviv_fb_dep)
   endif
 
 elif get_option('gl').enabled()

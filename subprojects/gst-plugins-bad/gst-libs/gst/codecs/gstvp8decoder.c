@@ -102,6 +102,7 @@ static void
 gst_vp8_decoder_init (GstVp8Decoder * self)
 {
   gst_video_decoder_set_packetized (GST_VIDEO_DECODER (self), TRUE);
+  gst_video_decoder_set_needs_format (GST_VIDEO_DECODER (self), TRUE);
 
   self->priv = gst_vp8_decoder_get_instance_private (self);
 }
@@ -192,8 +193,8 @@ gst_vp8_decoder_check_codec_change (GstVp8Decoder * self,
     g_assert (klass->new_sequence);
 
     ret = klass->new_sequence (self, frame_hdr,
-        /* last/golden/alt 3 pictures */
-        3 + priv->preferred_output_delay);
+        /* last/golden/alt 3 reference pictures + current picture */
+        4 + priv->preferred_output_delay);
   }
 
   return ret;
@@ -374,6 +375,7 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
   GstVp8ParserResult pres;
   GstVp8Picture *picture = NULL;
   GstFlowReturn ret = GST_FLOW_OK;
+  GstFlowReturn output_ret = GST_FLOW_OK;
   GstVp8DecoderOutputFrame output_frame;
 
   GST_LOG_OBJECT (self,
@@ -402,7 +404,7 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
           GST_PTR_FORMAT, in_buf);
 
       gst_buffer_unmap (in_buf, &map);
-      gst_video_decoder_drop_frame (decoder, frame);
+      gst_video_decoder_release_frame (decoder, frame);
 
       return GST_FLOW_OK;
     }
@@ -482,7 +484,13 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
     gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
   }
 
-  gst_vp8_decoder_drain_output_queue (self, priv->preferred_output_delay, &ret);
+  gst_vp8_decoder_drain_output_queue (self, priv->preferred_output_delay,
+      &output_ret);
+  if (output_ret != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Output returned %s", gst_flow_get_name (output_ret));
+    return output_ret;
+  }
 
   if (ret == GST_FLOW_ERROR) {
     GST_VIDEO_DECODER_ERROR (self, 1, STREAM, DECODE,
@@ -508,7 +516,7 @@ error:
           ("Failed to decode data"), (NULL), ret);
     }
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
 
     return ret;
   }

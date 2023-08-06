@@ -27,6 +27,7 @@
 #include <gst/va/gstva.h>
 
 #include "gstvacaps.h"
+#include "gstvapluginutils.h"
 
 #define GST_CAT_DEFAULT gst_va_base_transform_debug
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
@@ -39,6 +40,15 @@ enum
 
 static GParamSpec *properties[N_PROPERTIES];
 
+#define META_TAG_COLORSPACE meta_tag_colorspace_quark
+static GQuark meta_tag_colorspace_quark;
+#define META_TAG_SIZE meta_tag_size_quark
+static GQuark meta_tag_size_quark;
+#define META_TAG_ORIENTATION meta_tag_orientation_quark
+static GQuark meta_tag_orientation_quark;
+#define META_TAG_VIDEO meta_tag_video_quark
+static GQuark meta_tag_video_quark;
+
 struct _GstVaBaseTransformPrivate
 {
   GstVideoInfo srcpad_info;
@@ -48,6 +58,8 @@ struct _GstVaBaseTransformPrivate
   GstCaps *sinkpad_caps;
   GstVideoInfo sinkpad_info;
   GstBufferPool *sinkpad_pool;
+  guint uncropped_width;
+  guint uncropped_height;
 
   GstCaps *filter_caps;
 };
@@ -73,14 +85,17 @@ gst_va_base_transform_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec)
 {
   GstVaBaseTransform *self = GST_VA_BASE_TRANSFORM (object);
+  GstVaBaseTransformClass *klass = GST_VA_BASE_TRANSFORM_GET_CLASS (self);
 
   switch (prop_id) {
     case PROP_DEVICE_PATH:{
-      if (!(self->display && GST_IS_VA_DISPLAY_DRM (self->display))) {
+      if (!self->display)
+        g_value_set_string (value, klass->render_device_path);
+      else if (GST_IS_VA_DISPLAY_PLATFORM (self->display))
+        g_object_get_property (G_OBJECT (self->display), "path", value);
+      else
         g_value_set_string (value, NULL);
-        return;
-      }
-      g_object_get_property (G_OBJECT (self->display), "path", value);
+
       break;
     }
     default:
@@ -616,6 +631,15 @@ gst_va_base_transform_class_init (GstVaBaseTransformClass * klass)
   GstElementClass *element_class;
   GstBaseTransformClass *trans_class;
 
+#define D(type) \
+  G_PASTE (META_TAG_, type) = \
+    g_quark_from_static_string (G_PASTE (G_PASTE (GST_META_TAG_VIDEO_, type), _STR))
+  D (COLORSPACE);
+  D (SIZE);
+  D (ORIENTATION);
+#undef D
+  META_TAG_VIDEO = g_quark_from_static_string (GST_META_TAG_VIDEO_STR);
+
   gobject_class = G_OBJECT_CLASS (klass);
   element_class = GST_ELEMENT_CLASS (klass);
   trans_class = GST_BASE_TRANSFORM_CLASS (klass);
@@ -647,8 +671,8 @@ gst_va_base_transform_class_init (GstVaBaseTransformClass * klass)
    * Since: 1.22
    */
   properties[PROP_DEVICE_PATH] = g_param_spec_string ("device-path",
-      "Device Path", "DRM device path", NULL,
-      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+      "Device Path", GST_VA_DEVICE_PATH_PROP_DESC, NULL,
+      GST_PARAM_DOC_SHOW_DEFAULT | G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, N_PROPERTIES, properties);
 
@@ -752,8 +776,54 @@ _try_import_dmabuf_unlocked (GstVaBaseTransform * self, GstBuffer * inbuf)
       mems, fd, offset, VA_SURFACE_ATTRIB_USAGE_HINT_VPP_READ);
 }
 
+static gboolean
+_check_uncropped_size (GstVaBaseTransform * self, GstBuffer * inbuf)
+{
+  GstVideoCropMeta *crop_meta;
+  GstVideoMeta *video_meta;
+
+  crop_meta = gst_buffer_get_video_crop_meta (inbuf);
+  video_meta = gst_buffer_get_video_meta (inbuf);
+
+  if (!crop_meta) {
+    if (self->priv->uncropped_width > 0 || self->priv->uncropped_height > 0) {
+      self->priv->uncropped_width = 0;
+      self->priv->uncropped_height = 0;
+      return TRUE;
+    }
+
+    return FALSE;
+  }
+
+  if (!video_meta) {
+    GST_WARNING_OBJECT (self, "The buffer has video crop meta without "
+        "video meta, the cropped result may be wrong.");
+    self->priv->uncropped_width = 0;
+    self->priv->uncropped_height = 0;
+    return FALSE;
+  }
+
+  if (video_meta->width < crop_meta->x + crop_meta->width ||
+      video_meta->height < crop_meta->y + crop_meta->height) {
+    GST_WARNING_OBJECT (self, "Invalid video meta or crop meta, "
+        "the cropped result may be wrong.");
+    self->priv->uncropped_width = 0;
+    self->priv->uncropped_height = 0;
+    return FALSE;
+  }
+
+  if (self->priv->uncropped_width != video_meta->width ||
+      self->priv->uncropped_height != video_meta->height) {
+    self->priv->uncropped_width = video_meta->width;
+    self->priv->uncropped_height = video_meta->height;
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
 static GstBufferPool *
-_get_sinkpad_pool (GstVaBaseTransform * self)
+_get_sinkpad_pool (GstVaBaseTransform * self, GstBuffer * inbuf)
 {
   GstAllocator *allocator;
   GstAllocationParams params = { 0, };
@@ -761,41 +831,58 @@ _get_sinkpad_pool (GstVaBaseTransform * self)
   GstVideoInfo in_info;
   guint size, usage_hint = VA_SURFACE_ATTRIB_USAGE_HINT_VPP_READ;
 
+  if (_check_uncropped_size (self, inbuf)) {
+    if (self->priv->sinkpad_pool)
+      gst_buffer_pool_set_active (self->priv->sinkpad_pool, FALSE);
+
+    gst_clear_object (&self->priv->sinkpad_pool);
+  }
+
   if (self->priv->sinkpad_pool)
     return self->priv->sinkpad_pool;
 
-  gst_allocation_params_init (&params);
+  if (self->priv->sinkpad_caps)
+    caps = gst_caps_copy (self->priv->sinkpad_caps);
+  else
+    caps = gst_caps_copy (self->in_caps);
 
-  if (self->priv->sinkpad_caps) {
-    caps = self->priv->sinkpad_caps;
-    if (!gst_video_info_from_caps (&in_info, caps)) {
-      GST_ERROR_OBJECT (self, "Cannot parse caps %" GST_PTR_FORMAT, caps);
-      return NULL;
-    }
-  } else {
-    caps = self->in_caps;
-    in_info = self->in_info;
+  gst_caps_set_features_simple (caps,
+      gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_VA));
+
+  /* When the input buffer contains video crop meta, the real video
+     resolution can be bigger than the caps. The video meta should
+     contain the real video resolution. */
+  if (self->priv->uncropped_width > 0)
+    gst_caps_set_simple (caps, "width", G_TYPE_INT,
+        self->priv->uncropped_width, NULL);
+  if (self->priv->uncropped_height > 0)
+    gst_caps_set_simple (caps, "height", G_TYPE_INT,
+        self->priv->uncropped_height, NULL);
+
+  if (!gst_video_info_from_caps (&in_info, caps)) {
+    GST_ERROR_OBJECT (self, "Cannot parse caps %" GST_PTR_FORMAT, caps);
+    gst_caps_unref (caps);
+    return NULL;
   }
 
   size = GST_VIDEO_INFO_SIZE (&in_info);
 
   allocator = gst_va_base_transform_allocator_from_caps (self, caps);
+  g_assert (GST_IS_VA_ALLOCATOR (allocator));
+
   self->priv->sinkpad_pool = gst_va_pool_new_with_config (caps, size, 1, 0,
       usage_hint, GST_VA_FEATURE_AUTO, allocator, &params);
   if (!self->priv->sinkpad_pool) {
+    gst_caps_unref (caps);
     gst_object_unref (allocator);
     return NULL;
   }
 
-  if (GST_IS_VA_DMABUF_ALLOCATOR (allocator)) {
-    gst_va_dmabuf_allocator_get_format (allocator, &self->priv->sinkpad_info,
-        NULL);
-  } else if (GST_IS_VA_ALLOCATOR (allocator)) {
-    gst_va_allocator_get_format (allocator, &self->priv->sinkpad_info, NULL,
-        NULL);
-  }
+  gst_va_allocator_get_format (allocator, &self->priv->sinkpad_info,
+      NULL, NULL);
 
   gst_object_unref (allocator);
+  gst_caps_unref (caps);
 
   if (!gst_buffer_pool_set_active (self->priv->sinkpad_pool, TRUE)) {
     GST_WARNING_OBJECT (self, "failed to active the sinkpad pool %"
@@ -824,6 +911,43 @@ _try_import_buffer (GstVaBaseTransform * self, GstBuffer * inbuf)
   return ret;
 }
 
+typedef struct
+{
+  GstVaBaseTransform *self;
+  GstBuffer *outbuf;
+} CopyMetaData;
+
+static gboolean
+foreach_metadata (GstBuffer * inbuf, GstMeta ** meta, gpointer user_data)
+{
+  CopyMetaData *data = user_data;
+  GstVaBaseTransform *self = data->self;
+  GstBuffer *outbuf = data->outbuf;
+  const GstMetaInfo *info = (*meta)->info;
+  gboolean do_copy = FALSE;
+
+  if (gst_meta_api_type_has_tag (info->api, META_TAG_COLORSPACE)
+      || gst_meta_api_type_has_tag (info->api, META_TAG_SIZE)
+      || gst_meta_api_type_has_tag (info->api, META_TAG_ORIENTATION)
+      || gst_meta_api_type_has_tag (info->api, META_TAG_VIDEO)) {
+    do_copy = TRUE;
+  }
+
+  if (do_copy) {
+    GstMetaTransformCopy copy_data = { FALSE, 0, -1 };
+    /* simply copy then */
+    if (info->transform_func) {
+      GST_DEBUG_OBJECT (self, "copy metadata %s", g_type_name (info->api));
+      info->transform_func (outbuf, *meta, inbuf,
+          _gst_meta_transform_copy, &copy_data);
+    } else {
+      GST_DEBUG_OBJECT (self, "couldn't copy metadata %s",
+          g_type_name (info->api));
+    }
+  }
+  return TRUE;
+}
+
 GstFlowReturn
 gst_va_base_transform_import_buffer (GstVaBaseTransform * self,
     GstBuffer * inbuf, GstBuffer ** buf)
@@ -833,6 +957,7 @@ gst_va_base_transform_import_buffer (GstVaBaseTransform * self,
   GstFlowReturn ret;
   GstVideoFrame in_frame, out_frame;
   gboolean imported, copied;
+  CopyMetaData data;
 
   g_return_val_if_fail (GST_IS_VA_BASE_TRANSFORM (self), GST_FLOW_ERROR);
 
@@ -845,7 +970,7 @@ gst_va_base_transform_import_buffer (GstVaBaseTransform * self,
   /* input buffer doesn't come from a vapool, thus it is required to
    * have a pool, grab from it a new buffer and copy the input
    * buffer to the new one */
-  if (!(pool = _get_sinkpad_pool (self)))
+  if (!(pool = _get_sinkpad_pool (self, inbuf)))
     return GST_FLOW_ERROR;
 
   ret = gst_buffer_pool_acquire_buffer (pool, &buffer, NULL);
@@ -871,10 +996,13 @@ gst_va_base_transform_import_buffer (GstVaBaseTransform * self,
   if (!copied)
     goto invalid_buffer;
 
-  /* copy metadata, default implemenation of baseclass will copy everything
-   * what we need */
-  GST_BASE_TRANSFORM_CLASS (parent_class)->copy_metadata
-      (GST_BASE_TRANSFORM_CAST (self), inbuf, buffer);
+  gst_buffer_copy_into (buffer, inbuf,
+      GST_BUFFER_COPY_FLAGS | GST_BUFFER_COPY_TIMESTAMPS, 0, -1);
+
+  data.self = self;
+  data.outbuf = buffer;
+
+  gst_buffer_foreach_meta (inbuf, foreach_metadata, &data);
 
   *buf = buffer;
 

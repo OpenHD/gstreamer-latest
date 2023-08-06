@@ -448,6 +448,8 @@ gst_matroska_parse_protection_meta (gpointer * data_out, gsize * size_out,
 
   /* Unencrypted buffer */
   if (!(signal_byte & GST_MATROSKA_BLOCK_ENCRYPTED)) {
+    *size_out = gst_byte_reader_get_remaining (&reader);
+    gst_byte_reader_get_data (&reader, *size_out, (const guint8 **) data_out);
     return TRUE;
   }
 
@@ -592,8 +594,9 @@ gst_matroska_parse_protection_meta (gpointer * data_out, gsize * size_out,
     gst_structure_set (info_protect, "subsample_count", G_TYPE_UINT, 0, NULL);
   }
 
-  gst_byte_reader_get_data (&reader, 0, (const guint8 **) data_out);
   *size_out = gst_byte_reader_get_remaining (&reader);
+  gst_byte_reader_get_data (&reader, *size_out, (const guint8 **) data_out);
+
   return TRUE;
 
 release_err:

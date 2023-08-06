@@ -65,6 +65,7 @@ enum
   PROP_PRIMARIES_MODE,
   PROP_DISPLAY_FORMAT,
   PROP_EMIT_PRESENT,
+  PROP_RENDER_RECTANGE,
 };
 
 #define DEFAULT_ADAPTER                   -1
@@ -399,6 +400,13 @@ gst_d3d11_video_sink_class_init (GstD3D11VideoSinkClass * klass)
               G_PARAM_STATIC_STRINGS)));
 
   /**
+   * GstD3D11VideoSink:render-rectangle:
+   *
+   * Since: 1.24
+   */
+  gst_video_overlay_install_properties (gobject_class, PROP_RENDER_RECTANGE);
+
+  /**
    * GstD3D11VideoSink::begin-draw:
    * @videosink: the #d3d11videosink
    *
@@ -464,7 +472,7 @@ gst_d3d11_video_sink_class_init (GstD3D11VideoSinkClass * klass)
       GST_DEBUG_FUNCPTR (gst_d3d11_video_sink_set_context);
 
   gst_element_class_set_static_metadata (element_class,
-      "Direct3D11 video sink", "Sink/Video",
+      "Direct3D11 Video Sink", "Sink/Video",
       "A Direct3D11 based videosink",
       "Seungha Yang <seungha.yang@navercorp.com>");
 
@@ -570,6 +578,10 @@ gst_d3d11_videosink_set_property (GObject * object, guint prop_id,
       break;
     case PROP_EMIT_PRESENT:
       self->emit_present = g_value_get_boolean (value);
+      break;
+    case PROP_RENDER_RECTANGE:
+      gst_video_overlay_set_property (object, PROP_RENDER_RECTANGE,
+          PROP_RENDER_RECTANGE, value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -834,6 +846,7 @@ gst_d3d11_video_sink_update_window (GstD3D11VideoSink * self, GstCaps * caps)
     if (ret == GST_FLOW_FLUSHING) {
       GstD3D11CSLockGuard lk (&self->lock);
       GST_WARNING_OBJECT (self, "Couldn't prepare window but we are flushing");
+      gst_d3d11_window_unprepare (self->window);
       gst_clear_object (&self->window);
       gst_object_unref (window);
 
@@ -1227,8 +1240,6 @@ gst_d3d11_video_sink_unlock_stop (GstBaseSink * sink)
   if (self->window)
     gst_d3d11_window_unlock_stop (self->window);
 
-  gst_clear_buffer (&self->prepared_buffer);
-
   return TRUE;
 }
 
@@ -1347,6 +1358,27 @@ gst_d3d11_video_sink_check_device_update (GstD3D11VideoSink * self,
   self->device = (GstD3D11Device *) gst_object_ref (dmem->device);
 }
 
+static gboolean
+gst_d3d11_video_sink_foreach_meta (GstBuffer * buffer, GstMeta ** meta,
+    GstBuffer * uploaded)
+{
+  GstVideoOverlayCompositionMeta *cmeta;
+
+  if ((*meta)->info->api != GST_VIDEO_OVERLAY_COMPOSITION_META_API_TYPE)
+    return TRUE;
+
+  cmeta = (GstVideoOverlayCompositionMeta *) (*meta);
+  if (!cmeta->overlay)
+    return TRUE;
+
+  if (gst_video_overlay_composition_n_rectangles (cmeta->overlay) == 0)
+    return TRUE;
+
+  gst_buffer_add_video_overlay_composition_meta (uploaded, cmeta->overlay);
+
+  return TRUE;
+}
+
 static GstFlowReturn
 gst_d3d11_video_sink_prepare (GstBaseSink * sink, GstBuffer * buffer)
 {
@@ -1371,8 +1403,6 @@ gst_d3d11_video_sink_prepare (GstBaseSink * sink, GstBuffer * buffer)
   }
 
   if (!gst_is_d3d11_buffer (buffer)) {
-    GstVideoOverlayCompositionMeta *overlay_meta;
-
     ret = gst_buffer_pool_acquire_buffer (self->pool, &self->prepared_buffer,
         nullptr);
     if (ret != GST_FLOW_OK)
@@ -1393,11 +1423,9 @@ gst_d3d11_video_sink_prepare (GstBaseSink * sink, GstBuffer * buffer)
       gst_memory_unmap (mem, &info);
     }
 
-    overlay_meta = gst_buffer_get_video_overlay_composition_meta (buffer);
-    if (overlay_meta) {
-      gst_buffer_add_video_overlay_composition_meta (self->prepared_buffer,
-          overlay_meta->overlay);
-    }
+    gst_buffer_foreach_meta (buffer,
+        (GstBufferForeachMetaFunc) gst_d3d11_video_sink_foreach_meta,
+        self->prepared_buffer);
   } else {
     self->prepared_buffer = gst_buffer_ref (buffer);
   }

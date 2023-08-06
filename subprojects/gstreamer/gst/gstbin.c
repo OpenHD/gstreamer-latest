@@ -124,7 +124,7 @@
  *   sink is in the bin, the query fails.
  *
  * A #GstBin will by default forward any event sent to it to all sink
- * ( %GST_EVENT_TYPE_DOWNSTREAM ) or source ( %GST_EVENT_TYPE_UPSTREAM ) elements
+ * ( %GST_EVENT_TYPE_UPSTREAM ) or source ( %GST_EVENT_TYPE_DOWNSTREAM ) elements
  * depending on the event type.
  *
  * If all the elements return %TRUE, the bin will also return %TRUE, else %FALSE
@@ -3496,6 +3496,13 @@ was_busy:
 nothing_pending:
   {
     GST_CAT_INFO_OBJECT (GST_CAT_STATES, bin, "nothing pending");
+
+    amessage = gst_message_new_async_done (GST_OBJECT_CAST (bin), running_time);
+
+    GST_OBJECT_UNLOCK (bin);
+    gst_element_post_message (GST_ELEMENT_CAST (bin), amessage);
+    GST_OBJECT_LOCK (bin);
+
     return;
   }
 }

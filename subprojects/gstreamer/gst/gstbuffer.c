@@ -543,6 +543,7 @@ gst_buffer_copy_into (GstBuffer * dest, GstBuffer * src,
   GstMetaItem *walk;
   gsize bufsize;
   gboolean region = FALSE;
+  gboolean sharing_mem = FALSE;
 
   g_return_val_if_fail (dest != NULL, FALSE);
   g_return_val_if_fail (src != NULL, FALSE);
@@ -646,6 +647,9 @@ gst_buffer_copy_into (GstBuffer * dest, GstBuffer * src,
           return FALSE;
         }
 
+        /* Indicates if dest references any of src memories. */
+        sharing_mem |= (newmem == mem);
+
         _memory_add (dest, -1, newmem);
         left -= tocopy;
       }
@@ -659,6 +663,10 @@ gst_buffer_copy_into (GstBuffer * dest, GstBuffer * src,
         gst_buffer_remove_memory_range (dest, dest_len, -1);
         return FALSE;
       }
+
+      /* If we were sharing memory and the merge is no-op, we are still sharing. */
+      sharing_mem &= (mem == GST_BUFFER_MEM_PTR (dest, 0));
+
       _replace_memory (dest, len, 0, len, mem);
     }
   }
@@ -688,7 +696,8 @@ gst_buffer_copy_into (GstBuffer * dest, GstBuffer * src,
       } else if (deep && gst_meta_api_type_has_tag (info->api,
               _gst_meta_tag_memory_reference)) {
         GST_CAT_DEBUG (GST_CAT_BUFFER,
-            "don't copy meta with memory references %" GST_PTR_FORMAT, meta);
+            "don't copy memory reference meta %p of API type %s", meta,
+            g_type_name (info->api));
       } else if (info->transform_func) {
         GstMetaTransformCopy copy_data;
 
@@ -704,6 +713,14 @@ gst_buffer_copy_into (GstBuffer * dest, GstBuffer * src,
         }
       }
     }
+  }
+
+  if (sharing_mem && src->pool != NULL) {
+    /* The new buffer references some of src's memories. We have to ensure that
+     * src buffer does not return to its buffer pool as long as its memories are
+     * used by other buffers. That would cause the buffer to be discarted by the
+     * pool because its memories are not writable. */
+    gst_buffer_add_parent_buffer_meta (dest, src);
   }
 
   return TRUE;
@@ -784,6 +801,15 @@ _gst_buffer_free (GstBuffer * buffer)
 
   GST_CAT_LOG (GST_CAT_BUFFER, "finalize %p", buffer);
 
+  /* free our memory */
+  len = GST_BUFFER_MEM_LEN (buffer);
+  for (i = 0; i < len; i++) {
+    gst_memory_unlock (GST_BUFFER_MEM_PTR (buffer, i), GST_LOCK_FLAG_EXCLUSIVE);
+    gst_mini_object_remove_parent (GST_MINI_OBJECT_CAST (GST_BUFFER_MEM_PTR
+            (buffer, i)), GST_MINI_OBJECT_CAST (buffer));
+    gst_memory_unref (GST_BUFFER_MEM_PTR (buffer, i));
+  }
+
   /* free metadata */
   for (walk = GST_BUFFER_META (buffer); walk; walk = next) {
     GstMeta *meta = &walk->meta;
@@ -796,15 +822,6 @@ _gst_buffer_free (GstBuffer * buffer)
     next = walk->next;
     /* and free the slice */
     g_free (walk);
-  }
-
-  /* free our memory */
-  len = GST_BUFFER_MEM_LEN (buffer);
-  for (i = 0; i < len; i++) {
-    gst_memory_unlock (GST_BUFFER_MEM_PTR (buffer, i), GST_LOCK_FLAG_EXCLUSIVE);
-    gst_mini_object_remove_parent (GST_MINI_OBJECT_CAST (GST_BUFFER_MEM_PTR
-            (buffer, i)), GST_MINI_OBJECT_CAST (buffer));
-    gst_memory_unref (GST_BUFFER_MEM_PTR (buffer, i));
   }
 
 #ifdef USE_POISONING

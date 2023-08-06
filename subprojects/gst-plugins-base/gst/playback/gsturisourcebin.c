@@ -663,7 +663,9 @@ copy_sticky_events (GstPad * pad, GstEvent ** event, gpointer user_data)
 {
   GstPad *gpad = GST_PAD_CAST (user_data);
 
-  GST_DEBUG_OBJECT (gpad, "store sticky event %" GST_PTR_FORMAT, *event);
+  GST_DEBUG_OBJECT (gpad,
+      "store sticky event from %" GST_PTR_FORMAT " %" GST_PTR_FORMAT, pad,
+      *event);
   gst_pad_store_sticky_event (gpad, *event);
 
   return TRUE;
@@ -1125,6 +1127,7 @@ new_output_slot (ChildSrcPadInfo * info, GstPad * originating_pad)
     slot->queue_sinkpad =
         gst_element_request_pad_simple (info->multiqueue, "sink_%u");
     srcpad = gst_pad_get_single_internal_link (slot->queue_sinkpad);
+    gst_pad_sticky_events_foreach (originating_pad, copy_sticky_events, srcpad);
     slot->output_pad = create_output_pad (slot, srcpad);
     gst_object_unref (srcpad);
     gst_pad_link (originating_pad, slot->queue_sinkpad);
@@ -1326,10 +1329,10 @@ expose_output_pad (GstURISourceBin * urisrc, GstPad * pad)
 
   target = gst_ghost_pad_get_target (GST_GHOST_PAD (pad));
 
+  gst_pad_set_active (pad, TRUE);
   gst_pad_sticky_events_foreach (target, copy_sticky_events, pad);
   gst_object_unref (target);
 
-  gst_pad_set_active (pad, TRUE);
   GST_URI_SOURCE_BIN_LOCK (urisrc);
   if (!urisrc->activated) {
     GST_DEBUG_OBJECT (urisrc, "Not fully activated, adding pad once PAUSED !");
@@ -1462,8 +1465,6 @@ gen_source_element (GstURISourceBin * urisrc)
   GObjectClass *source_class;
   GstElement *source;
   GParamSpec *pspec;
-  GstQuery *query;
-  GstSchedulingFlags flags;
   GError *err = NULL;
 
   if (!urisrc->uri)
@@ -1483,31 +1484,9 @@ gen_source_element (GstURISourceBin * urisrc)
 
   GST_LOG_OBJECT (urisrc, "found source type %s", G_OBJECT_TYPE_NAME (source));
 
-  urisrc->is_stream = IS_STREAM_URI (urisrc->uri);
-
-  query = gst_query_new_scheduling ();
-  if (gst_element_query (source, query)) {
-    gst_query_parse_scheduling (query, &flags, NULL, NULL, NULL);
-    if ((flags & GST_SCHEDULING_FLAG_BANDWIDTH_LIMITED))
-      urisrc->is_stream = TRUE;
-  }
-  gst_query_unref (query);
-
   source_class = G_OBJECT_GET_CLASS (source);
 
-  if (urisrc->is_stream) {
-    /* Live sources are not streamable */
-    pspec = g_object_class_find_property (source_class, "is-live");
-    if (pspec && G_PARAM_SPEC_VALUE_TYPE (pspec) == G_TYPE_BOOLEAN) {
-      gboolean is_live;
-      g_object_get (G_OBJECT (source), "is-live", &is_live, NULL);
-      if (is_live)
-        urisrc->is_stream = FALSE;
-    }
-  }
-
-  GST_LOG_OBJECT (urisrc, "source is stream: %d", urisrc->is_stream);
-
+  /* Propagate connection speed */
   pspec = g_object_class_find_property (source_class, "connection-speed");
   if (pspec != NULL) {
     guint64 speed = urisrc->connection_speed / 1000;
@@ -1747,6 +1726,38 @@ analyse_source_and_expose_raw_pads (GstURISourceBin * urisrc,
   GstIterator *pads_iter;
   gboolean res = TRUE;
 
+  /* Collect generic information about the source */
+
+  urisrc->is_stream = IS_STREAM_URI (urisrc->uri);
+
+  if (!urisrc->is_stream) {
+    GstQuery *query;
+    GstSchedulingFlags flags;
+    /* do a final check to see if the source element is streamable */
+    query = gst_query_new_scheduling ();
+    if (gst_element_query (urisrc->source, query)) {
+      gst_query_parse_scheduling (query, &flags, NULL, NULL, NULL);
+      if ((flags & GST_SCHEDULING_FLAG_BANDWIDTH_LIMITED))
+        urisrc->is_stream = TRUE;
+    }
+    gst_query_unref (query);
+  }
+
+  if (urisrc->is_stream) {
+    GObjectClass *source_class = G_OBJECT_GET_CLASS (urisrc->source);
+    GParamSpec *pspec = g_object_class_find_property (source_class, "is-live");
+    /* Live sources are not streamable */
+    if (pspec && G_PARAM_SPEC_VALUE_TYPE (pspec) == G_TYPE_BOOLEAN) {
+      gboolean is_live;
+      g_object_get (G_OBJECT (urisrc->source), "is-live", &is_live, NULL);
+      if (is_live)
+        urisrc->is_stream = FALSE;
+    }
+  }
+
+  GST_LOG_OBJECT (urisrc, "source is stream: %d", urisrc->is_stream);
+
+  /* Handle the existing source pads */
   pads_iter = gst_element_iterate_src_pads (urisrc->source);
 
 restart:
@@ -2282,12 +2293,16 @@ setup_source (GstURISourceBin * urisrc)
    * handled by the application right after. */
   gst_bin_add (GST_BIN_CAST (urisrc), urisrc->source);
 
-  /* notify of the new source used */
+  /* notify of the new source used and allow external users to do final
+   * modifications before activating the element */
   g_object_notify (G_OBJECT (urisrc), "source");
 
   g_signal_emit (urisrc, gst_uri_source_bin_signals[SIGNAL_SOURCE_SETUP],
       0, urisrc->source);
 
+  if (gst_element_set_state (urisrc->source,
+          GST_STATE_READY) != GST_STATE_CHANGE_SUCCESS)
+    goto state_fail;
   /* see if the source element emits raw audio/video all by itself,
    * if so, we can create streams for the pads and be done with it.
    * Also check that is has source pads, if not, we assume it will
@@ -2318,6 +2333,12 @@ invalid_source:
   {
     GST_ELEMENT_ERROR (urisrc, CORE, FAILED,
         (_("Source element is invalid.")), (NULL));
+    return FALSE;
+  }
+state_fail:
+  {
+    GST_ELEMENT_ERROR (urisrc, CORE, FAILED,
+        (_("Source element can't be prepared")), (NULL));
     return FALSE;
   }
 no_pads:

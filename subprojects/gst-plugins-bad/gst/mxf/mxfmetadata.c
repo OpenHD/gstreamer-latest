@@ -734,7 +734,8 @@ mxf_metadata_preface_to_structure (MXFMetadataBase * m)
   if (self->n_identifications > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -778,7 +779,8 @@ mxf_metadata_preface_to_structure (MXFMetadataBase * m)
   if (self->n_essence_containers > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -804,7 +806,8 @@ mxf_metadata_preface_to_structure (MXFMetadataBase * m)
   if (self->n_dm_schemes > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -1418,7 +1421,8 @@ mxf_metadata_content_storage_to_structure (MXFMetadataBase * m)
   if (self->n_packages > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -1447,7 +1451,8 @@ mxf_metadata_content_storage_to_structure (MXFMetadataBase * m)
   if (self->n_essence_container_data > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -1910,7 +1915,8 @@ mxf_metadata_generic_package_to_structure (MXFMetadataBase * m)
   if (self->n_tracks > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -2556,19 +2562,20 @@ static const struct
   const MXFMetadataTrackType type;
 } mxf_metadata_track_identifier[] = {
   {
-  MXF_UL (TRACK_TIMECODE_12M_INACTIVE),
-        MXF_METADATA_TRACK_TIMECODE_12M_INACTIVE}, {
-  MXF_UL (TRACK_TIMECODE_12M_ACTIVE), MXF_METADATA_TRACK_TIMECODE_12M_ACTIVE}, {
-  MXF_UL (TRACK_TIMECODE_309M), MXF_METADATA_TRACK_TIMECODE_309M}, {
-  MXF_UL (TRACK_METADATA), MXF_METADATA_TRACK_METADATA}, {
-  MXF_UL (TRACK_PICTURE_ESSENCE), MXF_METADATA_TRACK_PICTURE_ESSENCE}, {
-  MXF_UL (TRACK_SOUND_ESSENCE), MXF_METADATA_TRACK_SOUND_ESSENCE}, {
-  MXF_UL (TRACK_DATA_ESSENCE), MXF_METADATA_TRACK_DATA_ESSENCE}, {
-  MXF_UL (TRACK_AUXILIARY_DATA), MXF_METADATA_TRACK_AUXILIARY_DATA}, {
-  MXF_UL (TRACK_PARSED_TEXT), MXF_METADATA_TRACK_PARSED_TEXT},
-      /* Avid video? */
+        MXF_UL (TRACK_TIMECODE_12M_INACTIVE),
+      MXF_METADATA_TRACK_TIMECODE_12M_INACTIVE}, {
+        MXF_UL (TRACK_TIMECODE_12M_ACTIVE),
+      MXF_METADATA_TRACK_TIMECODE_12M_ACTIVE}, {
+      MXF_UL (TRACK_TIMECODE_309M), MXF_METADATA_TRACK_TIMECODE_309M}, {
+      MXF_UL (TRACK_METADATA), MXF_METADATA_TRACK_METADATA}, {
+      MXF_UL (TRACK_PICTURE_ESSENCE), MXF_METADATA_TRACK_PICTURE_ESSENCE}, {
+      MXF_UL (TRACK_SOUND_ESSENCE), MXF_METADATA_TRACK_SOUND_ESSENCE}, {
+      MXF_UL (TRACK_DATA_ESSENCE), MXF_METADATA_TRACK_DATA_ESSENCE}, {
+      MXF_UL (TRACK_AUXILIARY_DATA), MXF_METADATA_TRACK_AUXILIARY_DATA}, {
+      MXF_UL (TRACK_PARSED_TEXT), MXF_METADATA_TRACK_PARSED_TEXT},
+  /* Avid video? */
   {
-  MXF_UL (TRACK_AVID_PICTURE_ESSENCE), MXF_METADATA_TRACK_PICTURE_ESSENCE}
+      MXF_UL (TRACK_AVID_PICTURE_ESSENCE), MXF_METADATA_TRACK_PICTURE_ESSENCE}
 };
 
 MXFMetadataTrackType
@@ -2956,7 +2963,8 @@ mxf_metadata_sequence_to_structure (MXFMetadataBase * m)
   if (self->n_structural_components > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -3570,7 +3578,8 @@ mxf_metadata_dm_source_clip_to_structure (MXFMetadataBase * m)
   if (self->n_track_ids > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -3800,7 +3809,8 @@ mxf_metadata_dm_segment_to_structure (MXFMetadataBase * m)
   if (self->n_track_ids > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -4065,7 +4075,8 @@ mxf_metadata_generic_descriptor_to_structure (MXFMetadataBase * m)
   if (self->n_locators > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 
@@ -6095,7 +6106,7 @@ mxf_metadata_multiple_descriptor_resolve (MXFMetadataBase * m,
 {
   MXFMetadataMultipleDescriptor *self = MXF_METADATA_MULTIPLE_DESCRIPTOR (m);
   MXFMetadataBase *current = NULL;
-  guint i, have_subdescriptors = 0;
+  guint i;
 #ifndef GST_DISABLE_GST_DEBUG
   gchar str[48];
 #endif
@@ -6111,7 +6122,6 @@ mxf_metadata_multiple_descriptor_resolve (MXFMetadataBase * m,
     if (current && MXF_IS_METADATA_GENERIC_DESCRIPTOR (current)) {
       if (mxf_metadata_base_resolve (current, metadata)) {
         self->sub_descriptors[i] = MXF_METADATA_GENERIC_DESCRIPTOR (current);
-        have_subdescriptors++;
       } else {
         GST_ERROR ("Couldn't resolve descriptor %s",
             mxf_uuid_to_string (&self->sub_descriptors_uids[i], str));
@@ -6140,7 +6150,8 @@ mxf_metadata_multiple_descriptor_to_structure (MXFMetadataBase * m)
   if (self->n_sub_descriptors > 0) {
     GValue arr = { 0, }
     , val = {
-    0,};
+      0,
+    };
 
     g_value_init (&arr, GST_TYPE_ARRAY);
 

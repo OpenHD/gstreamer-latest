@@ -402,8 +402,8 @@ GST_START_TEST (test_video_formats_all)
     fail_if (gst_video_format_from_string (fmt_str) ==
         GST_VIDEO_FORMAT_UNKNOWN);
   }
-  /* Take into account GST_VIDEO_FORMAT_ENCODED and UNKNOWN */
-  fail_unless_equals_int (num, num_formats - 2);
+  /* Take into account GST_VIDEO_FORMAT_ENCODED, UNKNOWN and DMA_DRM. */
+  fail_unless_equals_int (num, num_formats - 3);
 
   gst_caps_unref (caps);
 }
@@ -427,6 +427,9 @@ GST_START_TEST (test_video_formats_pack_unpack)
     guint8 *vdata, *unpack_data;
     gsize vsize, unpack_size;
     guint p;
+
+    if (n == GST_VIDEO_FORMAT_DMA_DRM)
+      continue;
 
     GST_INFO ("testing %s", gst_video_format_to_string (fmt));
 
@@ -792,6 +795,7 @@ GST_END_TEST;
 
 GST_START_TEST (test_parse_caps_rgb)
 {
+  /* *INDENT-OFF* */
   struct
   {
     const gchar *tmpl_caps_string;
@@ -820,6 +824,7 @@ GST_START_TEST (test_parse_caps_rgb)
     GST_VIDEO_CAPS_MAKE ("RGB15"), GST_VIDEO_FORMAT_RGB15}, {
     GST_VIDEO_CAPS_MAKE ("BGR15"), GST_VIDEO_FORMAT_BGR15}
   };
+  /* *INDENT-ON* */
   gint i;
 
   for (i = 0; i < G_N_ELEMENTS (formats); ++i) {
@@ -2196,6 +2201,9 @@ GST_START_TEST (test_video_pack_unpack2)
     gdouble unpack_sec, pack_sec;
     ConvertResult res;
 
+    if (format == GST_VIDEO_FORMAT_DMA_DRM)
+      continue;
+
     finfo = gst_video_format_get_info (format);
     fail_unless (finfo != NULL);
 
@@ -2529,6 +2537,9 @@ run_video_color_convert (ColorType in_type, ColorType out_type)
     GstVideoFrame inframe;
     GstBuffer *inbuffer;
 
+    if (infmt == GST_VIDEO_FORMAT_DMA_DRM)
+      continue;
+
     if (!check_video_format_is_type (infmt, in_type))
       continue;
 
@@ -2542,6 +2553,9 @@ run_video_color_convert (ColorType in_type, ColorType out_type)
       GstVideoFrame outframe;
       GstBuffer *outbuffer;
       GstVideoConverter *convert;
+
+      if (outfmt == GST_VIDEO_FORMAT_DMA_DRM)
+        continue;
 
       if (!check_video_format_is_type (outfmt, out_type))
         continue;
@@ -2635,6 +2649,9 @@ GST_START_TEST (test_video_size_convert)
     gdouble elapsed;
     gint count, method;
     ConvertResult res;
+
+    if (infmt == GST_VIDEO_FORMAT_DMA_DRM)
+      continue;
 
     fail_unless (gst_video_info_set_format (&ininfo, infmt, WIDTH_IN,
             HEIGHT_IN));
@@ -3214,7 +3231,9 @@ GST_START_TEST (test_video_formats_pstrides)
         || fmt == GST_VIDEO_FORMAT_NV12_10LE40
         || fmt == GST_VIDEO_FORMAT_Y410
         || fmt == GST_VIDEO_FORMAT_NV12_8L128
-        || fmt == GST_VIDEO_FORMAT_NV12_10BE_8L128) {
+        || fmt == GST_VIDEO_FORMAT_NV12_10BE_8L128
+        || fmt == GST_VIDEO_FORMAT_NV12_10LE40_4L4
+        || fmt == GST_VIDEO_FORMAT_DMA_DRM) {
       fmt++;
       continue;
     }
@@ -4111,6 +4130,78 @@ GST_START_TEST (test_video_color_primaries_equivalent)
 
 GST_END_TEST;
 
+GST_START_TEST (test_info_dma_drm)
+{
+  const char *nondma_str = "video/x-raw, format=NV12, width=16, height=16";
+  const char *dma_str = "video/x-raw(memory:DMABuf), format=NV12, width=16, "
+      "height=16";
+  const char *drm_str = "video/x-raw(memory:DMABuf), format=DMA_DRM, "
+      "width=16, height=16, interlace-mode=(string)progressive, "
+      "pixel-aspect-ratio=(fraction)1/1, framerate=(fraction)0/1, "
+      "drm-format=NV12:0x0100000000000002";
+  const char *invaliddrm_str = "video/x-raw(memory:DMABuf), width=16, "
+      "height=16, format=DMA_DRM, drm-format=ZZZZ:0xRGCSEz9ew80";
+  GstCaps *caps, *ncaps;
+  GstVideoInfo info;
+  GstVideoInfoDmaDrm drm_info;
+  GstVideoInfo vinfo;
+
+  caps = gst_caps_from_string (nondma_str);
+  fail_if (gst_video_is_dma_drm_caps (caps));
+  gst_caps_unref (caps);
+
+  caps = gst_caps_from_string (dma_str);
+  fail_if (gst_video_info_dma_drm_from_caps (&drm_info, caps));
+  gst_caps_unref (caps);
+
+  caps = gst_caps_from_string (drm_str);
+  fail_unless (gst_video_info_from_caps (&info, caps));
+  fail_unless (GST_VIDEO_INFO_FORMAT (&info) == GST_VIDEO_FORMAT_DMA_DRM);
+  fail_unless (gst_video_info_dma_drm_from_caps (&drm_info, caps));
+  fail_unless (drm_info.drm_fourcc == 0x3231564e
+      && drm_info.drm_modifier == 0x100000000000002);
+
+  fail_unless (gst_video_info_dma_drm_to_video_info (&drm_info, &info));
+  fail_unless (GST_VIDEO_INFO_FORMAT (&info) == GST_VIDEO_FORMAT_NV12);
+
+  ncaps = gst_video_info_dma_drm_to_caps (&drm_info);
+  fail_unless (ncaps);
+  fail_unless (gst_caps_is_equal (caps, ncaps));
+  gst_caps_unref (caps);
+  gst_caps_unref (ncaps);
+
+  caps = gst_caps_from_string (invaliddrm_str);
+  fail_if (gst_video_info_dma_drm_from_caps (&drm_info, caps));
+  gst_caps_unref (caps);
+
+  fail_unless (gst_video_info_set_format (&vinfo,
+          GST_VIDEO_FORMAT_NV12, 16, 16));
+  drm_info.vinfo = vinfo;
+  drm_info.drm_fourcc = 0x3231564e;
+  drm_info.drm_modifier = 0x100000000000002;
+  ncaps = gst_video_info_dma_drm_to_caps (&drm_info);
+  fail_unless (ncaps);
+  /* remove some fields unrelated to this test. */
+  gst_structure_remove_fields (gst_caps_get_structure (ncaps, 0),
+      "chroma-site", "colorimetry", NULL);
+
+  caps = gst_caps_from_string (drm_str);
+  fail_unless (gst_caps_is_equal (caps, ncaps));
+  gst_caps_unref (caps);
+  gst_caps_unref (ncaps);
+
+  fail_unless (gst_video_info_dma_drm_from_video_info (&drm_info, &vinfo, 0));
+  fail_unless (GST_VIDEO_INFO_FORMAT (&drm_info.vinfo) ==
+      GST_VIDEO_FORMAT_NV12);
+
+  fail_unless (gst_video_info_dma_drm_from_video_info (&drm_info, &vinfo,
+          0x100000000000002));
+  fail_unless (GST_VIDEO_INFO_FORMAT (&drm_info.vinfo) ==
+      GST_VIDEO_FORMAT_DMA_DRM);
+}
+
+GST_END_TEST;
+
 static Suite *
 video_suite (void)
 {
@@ -4168,6 +4259,7 @@ video_suite (void)
   tcase_add_test (tc_chain, test_video_extrapolate_stride);
   tcase_add_test (tc_chain, test_auto_video_frame_unmap);
   tcase_add_test (tc_chain, test_video_color_primaries_equivalent);
+  tcase_add_test (tc_chain, test_info_dma_drm);
 
   return s;
 }

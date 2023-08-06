@@ -81,6 +81,47 @@ GType gst_d3d11_converter_backend_get_type (void);
  */
 #define GST_D3D11_CONVERTER_OPT_PRIMARIES_MODE "GstD3D11Converter.primaries-mode"
 
+ /**
+  * GST_D3D11_CONVERTER_OPT_SAMPLER_FILTER:
+  *
+  * #D3D11_FILTER, set sampler filter.
+  *
+  * Supported values are:
+  * @D3D11_FILTER_MIN_MAG_MIP_POINT
+  * @D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT
+  * @D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT
+  *
+  * Default is #D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT.
+  *
+  * Since: 1.24
+  */
+#define GST_D3D11_CONVERTER_OPT_SAMPLER_FILTER "GstD3D11Converter.sampler-filter"
+
+GST_D3D11_API
+GType gst_d3d11_converter_sampler_filter_get_type (void);
+#define GST_TYPE_D3D11_CONVERTER_SAMPLER_FILTER (gst_d3d11_converter_sampler_filter_get_type())
+
+/**
+ * GstD3D11ConverterAlphaMode:
+ * @GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED: Unspecified alpha mode
+ * @GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED: Premultiplied alpha
+ * @GST_D3D11_CONVERTER_ALPHA_MODE_STRAIGHT: Straight alpha
+ *
+ * Alpha mode. Enum values are idnetical to DXGI_ALPHA_MODE
+ *
+ * Since: 1.24
+ */
+typedef enum
+{
+  GST_D3D11_CONVERTER_ALPHA_MODE_UNSPECIFIED = 0,
+  GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED = 1,
+  GST_D3D11_CONVERTER_ALPHA_MODE_STRAIGHT = 2,
+} GstD3D11ConverterAlphaMode;
+
+GST_D3D11_API
+GType gst_d3d11_converter_alpha_mode_get_type (void);
+#define GST_TYPE_D3D11_CONVERTER_ALPHA_MODE (gst_d3d11_converter_alpha_mode_get_type())
+
 /**
  * GstD3D11Converter:
  *

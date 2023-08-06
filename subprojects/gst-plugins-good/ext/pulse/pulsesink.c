@@ -178,9 +178,9 @@ struct _GstPulseRingBuffer
   gint64 m_offset;
   gint64 m_lastoffset;
 
-  gboolean corked:1;
-  gboolean in_commit:1;
-  gboolean paused:1;
+  gboolean corked;
+  gboolean in_commit;
+  gboolean paused;
 };
 struct _GstPulseRingBufferClass
 {
@@ -1567,7 +1567,7 @@ gst_pulseringbuffer_commit (GstAudioRingBuffer * buf, guint64 * sample,
           goto fake_done;
         }
 
-        if (pbuf->m_writable == (size_t) - 1)
+        if (pbuf->m_writable == (size_t) -1)
           goto writable_size_failed;
 
         pbuf->m_writable /= bpf;
