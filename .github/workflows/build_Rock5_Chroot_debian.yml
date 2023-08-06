@@ -38,7 +38,8 @@ jobs:
         run: |
           git clone https://github.com/OpenHD/ChrootCompilationTest /opt/ChrootCompilationTest
           mkdir -p /opt/ChrootCompilationTest/additionalFiles
-          git clone https://github.com/OpenHD/gstreamer-latest -b /opt/ChrootCompilationTest/additionalFiles/ --recursive
+          cd /opt/ChrootCompilationTest/additionalFiles
+          git clone https://github.com/OpenHD/gstreamer-latest --recursive
           echo $CLOUDSMITH_API_KEY > /opt/ChrootCompilationTest/additionalFiles/cloudsmith_api_key.txt
           echo "debian" > /opt/ChrootCompilationTest/additionalFiles/distro.txt
           echo "bullseye" > /opt/ChrootCompilationTest/additionalFiles/flavor.txt
