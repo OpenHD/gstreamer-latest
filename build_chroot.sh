@@ -5,6 +5,7 @@
 sudo apt install -y python3-pip
 sudo pip3 install --upgrade cloudsmith-cli
 ls -a
+bash install_build_dep.sh
 meson --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good:qt5=enabled build 
 ninja -c build
 

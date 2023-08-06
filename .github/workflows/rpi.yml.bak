@@ -51,6 +51,7 @@ jobs:
             sudo ln -s /opt/Qt5.15.4/bin/qmake /usr/bin/qmake
             export PATH="$PATH:/opt/Qt5.15.4/bin/"
             meson --prefix=/tmp/gst-plugins-good/usr -Dbad=disabled -Dlibav=disabled -Dugly=disabled -Dgood=enabled -Dgst-plugins-good:qt5=enabled -Dgst-plugins-good:rpicamsrc=enabled build            
+            ./install-build-dependencies.sh
             ninja -C build
             ninja -C build install
             fpm -a armhf -s dir -t deb -n gst-latest -v 2.3-evo-$(date '+%m%d%H%M') -C /tmp/gst-plugins-good -p gst-latest-1.22.deb
