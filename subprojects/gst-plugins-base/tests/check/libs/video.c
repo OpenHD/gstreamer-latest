@@ -3233,7 +3233,8 @@ GST_START_TEST (test_video_formats_pstrides)
         || fmt == GST_VIDEO_FORMAT_NV12_8L128
         || fmt == GST_VIDEO_FORMAT_NV12_10BE_8L128
         || fmt == GST_VIDEO_FORMAT_NV12_10LE40_4L4
-        || fmt == GST_VIDEO_FORMAT_DMA_DRM) {
+        || fmt == GST_VIDEO_FORMAT_DMA_DRM
+        || fmt == GST_VIDEO_FORMAT_MT2110T || fmt == GST_VIDEO_FORMAT_MT2110R) {
       fmt++;
       continue;
     }
@@ -4023,6 +4024,18 @@ GST_START_TEST (test_video_make_raw_caps)
   expected =
       gst_caps_from_string (GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("ANY",
           GST_VIDEO_FORMATS_ALL));
+  fail_unless (gst_caps_is_equal (caps, expected));
+  gst_caps_unref (caps);
+  gst_caps_unref (expected);
+
+  guint len;
+  const GstVideoFormat *formats = gst_video_formats_any (&len);
+  caps =
+      gst_video_make_raw_caps_with_features (formats, len,
+      gst_caps_features_new_any ());
+  expected =
+      gst_caps_from_string (GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("ANY",
+          GST_VIDEO_FORMATS_ANY));
   fail_unless (gst_caps_is_equal (caps, expected));
   gst_caps_unref (caps);
   gst_caps_unref (expected);

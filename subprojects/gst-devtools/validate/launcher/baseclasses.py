@@ -683,7 +683,7 @@ class Test(Loggable):
             self.out.write("# `%s`\n\n"
                            "## Command\n\n``` bash\n%s\n```\n\n" % (
                                self.classname, self.get_command_repr()))
-            self.out.write("## %s output\n\n``` \n\n" % os.path.basename(self.application))
+            self.out.write("## %s output\n\n``` log \n\n" % os.path.basename(self.application))
             self.out.flush()
         else:
             message = "Launching: %s%s\n" \
@@ -741,10 +741,6 @@ class Test(Loggable):
         for n in self.__env_variable:
             clean_env[n] = self.proc_env.get(n, None)
         self.proc_env = clean_env
-
-        # Don't keep around JSON report objects, they were processed
-        # in check_results already
-        self.reports = []
 
         return self.result
 
@@ -955,12 +951,14 @@ class GstValidateTest(Test):
         subproc_env["GST_VALIDATE_UUID"] = self.get_uuid()
         subproc_env["GST_VALIDATE_LOGSDIR"] = self.options.logsdir
 
-        if 'GST_DEBUG' in os.environ and not self.options.redirect_logs:
+        no_color = True
+        if 'GST_DEBUG' in os.environ and not self.options.redirect_logs and not self.options.debug:
             gstlogsfile = os.path.splitext(self.logfile)[0] + '.gstdebug'
             self.extra_logfiles.add(gstlogsfile)
             subproc_env["GST_DEBUG_FILE"] = gstlogsfile
+            no_color = self.options.no_color
 
-        if self.options.no_color:
+        if no_color:
             subproc_env["GST_DEBUG_NO_COLOR"] = '1'
 
         # Ensure XInitThreads is called, see bgo#731525
@@ -999,6 +997,11 @@ class GstValidateTest(Test):
         self.media_duration = -1
         self.speed = 1.0
         self.actions_infos = []
+
+    def copy(self, nth=None):
+        new_test = super().copy(nth=nth)
+        new_test.reports = copy.deepcopy(self.reports)
+        return new_test
 
     def build_arguments(self):
         super(GstValidateTest, self).build_arguments()
@@ -1231,6 +1234,15 @@ class GstValidateTest(Test):
         result = super(GstValidateTest, self).get_valgrind_suppressions()
         result.extend(utils.get_gst_build_valgrind_suppressions())
         return result
+
+    def test_end(self, retry_on_failures=False):
+        ret = super().test_end(retry_on_failures=retry_on_failures)
+
+        # Don't keep around JSON report objects, they were processed
+        # in check_results already
+        self.reports = []
+
+        return ret
 
 
 class VariableFramerateMode(Enum):
@@ -2386,7 +2398,7 @@ class ScenarioManager(Loggable):
         mfile_bname = os.path.basename(mfile)
 
         for f in os.listdir(os.path.dirname(mfile)):
-            if re.findall("%s\..*\.%s$" % (re.escape(mfile_bname), self.FILE_EXTENSION), f):
+            if re.findall(r'%s\..*\.%s$' % (re.escape(mfile_bname), self.FILE_EXTENSION), f):
                 scenarios.append(os.path.join(os.path.dirname(mfile), f))
 
         if scenarios:
@@ -2416,7 +2428,7 @@ class ScenarioManager(Loggable):
 
         config = configparser.RawConfigParser()
         f = open(scenario_defs)
-        config.readfp(f)
+        config.read_file(f)
 
         for section in config.sections():
             name = None

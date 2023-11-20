@@ -153,6 +153,12 @@ struct _GstH264DecoderPrivate
 
   /* Return value from output_picture() */
   GstFlowReturn last_flow;
+
+  /* Latency report params */
+  guint32 max_reorder_count;
+  guint32 last_reorder_frame_number;
+  gint fps_n;
+  gint fps_d;
 };
 
 typedef struct
@@ -406,6 +412,17 @@ gst_h264_decoder_finalize (GObject * object)
 }
 
 static void
+gst_h264_decoder_reset_latency_infos (GstH264Decoder * self)
+{
+  GstH264DecoderPrivate *priv = self->priv;
+
+  priv->max_reorder_count = 0;
+  priv->last_reorder_frame_number = 0;
+  priv->fps_n = 25;
+  priv->fps_d = 1;
+}
+
+static void
 gst_h264_decoder_reset (GstH264Decoder * self)
 {
   GstH264DecoderPrivate *priv = self->priv;
@@ -420,6 +437,8 @@ gst_h264_decoder_reset (GstH264Decoder * self)
   priv->height = 0;
   priv->nal_length_size = 4;
   priv->last_flow = GST_FLOW_OK;
+
+  gst_h264_decoder_reset_latency_infos (self);
 }
 
 static gboolean
@@ -473,7 +492,7 @@ gst_h264_decoder_clear_dpb (GstH264Decoder * self, gboolean flush)
   if (!flush) {
     while ((picture = gst_h264_dpb_bump (priv->dpb, TRUE)) != NULL) {
       GstVideoCodecFrame *frame = gst_video_decoder_get_frame (decoder,
-          picture->system_frame_number);
+          GST_CODEC_PICTURE_FRAME_NUMBER (picture));
 
       if (frame)
         gst_video_decoder_release_frame (decoder, frame);
@@ -796,7 +815,7 @@ gst_h264_decoder_split_frame (GstH264Decoder * self, GstH264Picture * picture)
   other_field->frame_num = picture->frame_num;
   other_field->ref = picture->ref;
   other_field->nonexisting = picture->nonexisting;
-  other_field->system_frame_number = picture->system_frame_number;
+  GST_CODEC_PICTURE_COPY_FRAME_NUMBER (other_field, picture);
   other_field->field_pic_flag = picture->field_pic_flag;
 
   return other_field;
@@ -1034,11 +1053,12 @@ gst_h264_decoder_start_current_picture (GstH264Decoder * self)
   g_assert (priv->active_sps != NULL);
   g_assert (priv->active_pps != NULL);
 
+  current_picture = priv->current_picture;
+
   /* If subclass didn't update output state at this point,
    * marking this picture as a discont and stores current input state */
   if (priv->input_state_changed) {
-    priv->current_picture->discont_state =
-        gst_video_codec_state_ref (self->input_state);
+    gst_h264_picture_set_discont_state (current_picture, self->input_state);
     priv->input_state_changed = FALSE;
   }
 
@@ -1055,8 +1075,6 @@ gst_h264_decoder_start_current_picture (GstH264Decoder * self)
 
   if (!gst_h264_decoder_init_current_picture (self))
     return GST_FLOW_ERROR;
-
-  current_picture = priv->current_picture;
 
   /* If the new picture is an IDR, flush DPB */
   if (current_picture->idr) {
@@ -1291,10 +1309,14 @@ gst_h264_decoder_parse_slice (GstH264Decoder * self, GstH264NalUnit * nalu)
         gst_h264_picture_unref (picture);
         return ret;
       }
+
+      priv->last_reorder_frame_number++;
+      picture->reorder_frame_number = priv->last_reorder_frame_number;
     }
 
     /* This allows accessing the frame from the picture. */
-    picture->system_frame_number = priv->current_frame->system_frame_number;
+    GST_CODEC_PICTURE_FRAME_NUMBER (picture) =
+        priv->current_frame->system_frame_number;
     priv->current_picture = picture;
 
     ret = gst_h264_decoder_start_current_picture (self);
@@ -1797,8 +1819,30 @@ gst_h264_decoder_do_output_picture (GstH264Decoder * self,
   }
 #endif
 
+  if (priv->last_reorder_frame_number > picture->reorder_frame_number) {
+    guint64 diff = priv->last_reorder_frame_number -
+        picture->reorder_frame_number;
+    guint64 total_delay = diff + priv->preferred_output_delay;
+    if (diff > priv->max_reorder_count && total_delay < G_MAXUINT32) {
+      GstClockTime latency;
+
+      priv->max_reorder_count = (guint32) diff;
+      latency = gst_util_uint64_scale_int (GST_SECOND * total_delay,
+          priv->fps_d, priv->fps_n);
+
+      if (latency != G_MAXUINT64) {
+        GST_DEBUG_OBJECT (self, "Updating latency to %" GST_TIME_FORMAT
+            ", reorder count: %" G_GUINT64_FORMAT ", output-delay: %u",
+            GST_TIME_ARGS (latency), diff, priv->preferred_output_delay);
+
+        gst_video_decoder_set_latency (GST_VIDEO_DECODER (self),
+            latency, latency);
+      }
+    }
+  }
+
   frame = gst_video_decoder_get_frame (GST_VIDEO_DECODER (self),
-      picture->system_frame_number);
+      GST_CODEC_PICTURE_FRAME_NUMBER (picture));
 
   if (!frame) {
     /* The case where the end_picture() got failed and corresponding
@@ -1808,7 +1852,7 @@ gst_h264_decoder_do_output_picture (GstH264Decoder * self,
     } else {
       GST_ERROR_OBJECT (self,
           "No available codec frame with frame number %d",
-          picture->system_frame_number);
+          GST_CODEC_PICTURE_FRAME_NUMBER (picture));
       UPDATE_FLOW_RETURN (ret, GST_FLOW_ERROR);
     }
 
@@ -2109,10 +2153,10 @@ gst_h264_decoder_finish_picture (GstH264Decoder * self,
    * drop codec frame of the second field because we are consuming
    * only the first codec frame via GstH264Decoder::output_picture() method */
   if (picture->second_field && picture->other_field &&
-      picture->system_frame_number !=
-      picture->other_field->system_frame_number) {
+      GST_CODEC_PICTURE_FRAME_NUMBER (picture) !=
+      GST_CODEC_PICTURE_FRAME_NUMBER (picture->other_field)) {
     GstVideoCodecFrame *frame = gst_video_decoder_get_frame (decoder,
-        picture->system_frame_number);
+        GST_CODEC_PICTURE_FRAME_NUMBER (picture));
 
     gst_video_decoder_release_frame (decoder, frame);
   }
@@ -2309,15 +2353,13 @@ gst_h264_decoder_set_latency (GstH264Decoder * self, const GstH264SPS * sps,
 
   bump_level = get_bump_level (self);
   if (bump_level != GST_H264_DPB_BUMP_NORMAL_LATENCY) {
-    if (sps->pic_order_cnt_type == 2) {
-      /* POC type 2 has does not allow frame reordering */
-      frames_delay = 0;
-    } else {
-      guint32 max_reorder_frames =
-          gst_h264_dpb_get_max_num_reorder_frames (priv->dpb);
-      frames_delay = MIN (max_dpb_size, max_reorder_frames);
-    }
+    GST_DEBUG_OBJECT (self, "Actual latency will be updated later");
+    frames_delay = 0;
   }
+
+  priv->max_reorder_count = frames_delay;
+  priv->fps_n = fps_n;
+  priv->fps_d = fps_d;
 
   /* Consider output delay wanted by subclass */
   frames_delay += priv->preferred_output_delay;
@@ -2432,6 +2474,8 @@ gst_h264_decoder_process_sps (GstH264Decoder * self, GstH264SPS * sps)
     ret = gst_h264_decoder_drain (GST_VIDEO_DECODER (self));
     if (ret != GST_FLOW_OK)
       return ret;
+
+    gst_h264_decoder_reset_latency_infos (self);
 
     g_assert (klass->new_sequence);
 

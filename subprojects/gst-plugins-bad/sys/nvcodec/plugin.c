@@ -49,6 +49,9 @@
 #endif
 #include "gstnvh264encoder.h"
 #include "gstnvh265encoder.h"
+#include "gstcudaipcsink.h"
+#include "gstcudaipcsrc.h"
+#include "gstnvcodecutils.h"
 
 GST_DEBUG_CATEGORY (gst_nvcodec_debug);
 GST_DEBUG_CATEGORY (gst_nvdec_debug);
@@ -60,6 +63,12 @@ GST_DEBUG_CATEGORY (gst_cuda_nvmm_debug);
 #endif
 
 #define GST_CAT_DEFAULT gst_nvcodec_debug
+
+static void
+plugin_deinit (gpointer data)
+{
+  gst_cuda_ipc_client_deinit ();
+}
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -127,11 +136,15 @@ plugin_init (GstPlugin * plugin)
   for (i = 0; i < dev_count; i++) {
     GstCudaContext *context = gst_cuda_context_new (i);
     CUcontext cuda_ctx;
+    gint64 adapter_luid = 0;
 
     if (!context) {
       GST_WARNING ("Failed to create context for device %d", i);
       continue;
     }
+#ifdef G_OS_WIN32
+    g_object_get (context, "dxgi-adapter-luid", &adapter_luid, NULL);
+#endif
 
     cuda_ctx = gst_cuda_context_get_handle (context);
     if (nvdec_available) {
@@ -154,26 +167,26 @@ plugin_init (GstPlugin * plugin)
           switch (codec) {
             case cudaVideoCodec_H264:
               /* higher than avdec_h264 */
-              gst_nv_h264_dec_register (plugin,
-                  i, GST_RANK_PRIMARY + 1, sink_template, src_template);
+              gst_nv_h264_dec_register (plugin, i, adapter_luid,
+                  GST_RANK_PRIMARY + 1, sink_template, src_template);
               break;
             case cudaVideoCodec_HEVC:
               /* higher than avdec_h265 */
-              gst_nv_h265_dec_register (plugin,
-                  i, GST_RANK_PRIMARY + 1, sink_template, src_template);
+              gst_nv_h265_dec_register (plugin, i, adapter_luid,
+                  GST_RANK_PRIMARY + 1, sink_template, src_template);
               break;
             case cudaVideoCodec_VP8:
-              gst_nv_vp8_dec_register (plugin,
-                  i, GST_RANK_PRIMARY, sink_template, src_template);
+              gst_nv_vp8_dec_register (plugin, i, adapter_luid,
+                  GST_RANK_PRIMARY, sink_template, src_template);
               break;
             case cudaVideoCodec_VP9:
-              gst_nv_vp9_dec_register (plugin,
-                  i, GST_RANK_PRIMARY, sink_template, src_template);
+              gst_nv_vp9_dec_register (plugin, i, adapter_luid,
+                  GST_RANK_PRIMARY, sink_template, src_template);
               break;
             case cudaVideoCodec_AV1:
               /* rust dav1ddec has "primary" rank */
-              gst_nv_av1_dec_register (plugin, i, GST_RANK_PRIMARY + 1,
-                  sink_template, src_template);
+              gst_nv_av1_dec_register (plugin, i, adapter_luid,
+                  GST_RANK_PRIMARY + 1, sink_template, src_template);
               break;
             default:
               register_cuviddec = TRUE;
@@ -196,10 +209,8 @@ plugin_init (GstPlugin * plugin)
 
 #ifdef G_OS_WIN32
       if (g_win32_check_windows_version (6, 0, 0, G_WIN32_OS_ANY)) {
-        gint64 adapter_luid;
         GstD3D11Device *d3d11_device;
 
-        g_object_get (context, "dxgi-adapter-luid", &adapter_luid, NULL);
         d3d11_device = gst_d3d11_device_new_for_adapter_luid (adapter_luid,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT);
         if (!d3d11_device) {
@@ -245,8 +256,12 @@ plugin_init (GstPlugin * plugin)
   }
 
   gst_cuda_memory_copy_register (plugin, GST_RANK_NONE);
-
   gst_cuda_filter_plugin_init (plugin);
+  gst_element_register (plugin,
+      "cudaipcsink", GST_RANK_NONE, GST_TYPE_CUDA_IPC_SINK);
+  gst_element_register (plugin,
+      "cudaipcsrc", GST_RANK_NONE, GST_TYPE_CUDA_IPC_SRC);
+
   gst_cuda_memory_init_once ();
 
 #ifdef HAVE_NVCODEC_NVMM
@@ -254,6 +269,10 @@ plugin_init (GstPlugin * plugin)
     GST_INFO ("Enable NVMM support");
   }
 #endif
+
+  g_object_set_data_full (G_OBJECT (plugin),
+      "plugin-nvcodec-shutdown", (gpointer) "shutdown-data",
+      (GDestroyNotify) plugin_deinit);
 
   return TRUE;
 }

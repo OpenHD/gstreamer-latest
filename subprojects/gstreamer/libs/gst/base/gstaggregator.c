@@ -2122,7 +2122,10 @@ gst_aggregator_release_pad (GstElement * element, GstPad * pad)
 
   SRC_LOCK (self);
   gst_aggregator_pad_set_flushing (aggpad, GST_FLOW_FLUSHING, TRUE);
+  PAD_LOCK (aggpad);
   gst_buffer_replace (&aggpad->priv->peeked_buffer, NULL);
+  gst_buffer_replace (&aggpad->priv->clipped_buffer, NULL);
+  PAD_UNLOCK (aggpad);
   gst_element_remove_pad (element, pad);
 
   self->priv->has_peer_latency = FALSE;
@@ -2953,7 +2956,6 @@ gst_aggregator_class_init (GstAggregatorClass * klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;
-  static const gchar *meta_tags[] = { NULL };
 
   aggregator_parent_class = g_type_class_peek_parent (klass);
 
@@ -3070,8 +3072,7 @@ gst_aggregator_class_init (GstAggregatorClass * klass)
       GST_TYPE_CLOCK_TIME, GST_TYPE_CLOCK_TIME,
       GST_TYPE_STRUCTURE | G_SIGNAL_TYPE_STATIC_SCOPE);
 
-  gst_meta_register_custom ("GstAggregatorMissingDataMeta", meta_tags, NULL,
-      NULL, NULL);
+  gst_meta_register_custom_simple ("GstAggregatorMissingDataMeta");
 }
 
 static inline gpointer
@@ -3246,6 +3247,7 @@ gst_aggregator_pad_chain_internal (GstAggregator * self,
 {
   GstFlowReturn flow_return;
   GstClockTime buf_pts;
+  GstClockTime buf_duration;
 
   GST_TRACE_OBJECT (aggpad,
       "entering chain internal with %" GST_PTR_FORMAT, buffer);
@@ -3258,6 +3260,7 @@ gst_aggregator_pad_chain_internal (GstAggregator * self,
   PAD_UNLOCK (aggpad);
 
   buf_pts = GST_BUFFER_PTS (buffer);
+  buf_duration = GST_BUFFER_DURATION (buffer);
 
   for (;;) {
     SRC_LOCK (self);
@@ -3314,6 +3317,9 @@ gst_aggregator_pad_chain_internal (GstAggregator * self,
         if (aggpad->priv->head_segment.format == GST_FORMAT_TIME) {
           start_time = buf_pts;
           if (start_time != -1) {
+            if (aggpad->priv->head_segment.rate < 0.0 && buf_duration != -1) {
+              start_time += buf_duration;
+            }
             start_time = MAX (start_time, aggpad->priv->head_segment.start);
             start_time =
                 gst_segment_to_running_time (&aggpad->priv->head_segment,
@@ -3822,8 +3828,8 @@ gst_aggregator_pad_is_inactive (GstAggregatorPad * pad)
   gboolean inactive;
 
   self = GST_AGGREGATOR (gst_pad_get_parent_element (GST_PAD (pad)));
-
-  g_assert_nonnull (self);
+  if (!self)
+    return FALSE;
 
   PAD_LOCK (pad);
   inactive = self->priv->ignore_inactive_pads && is_live_unlocked (self)

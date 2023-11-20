@@ -65,6 +65,10 @@ struct _GstVaBaseEnc
   GQueue output_list;
 
   GstVideoCodecState *input_state;
+  union {
+    GstVideoInfo in_info;
+    GstVideoInfoDmaDrm in_drm_info;
+  };
 
   /*< private >*/
   GstVaBaseEncPrivate *priv;

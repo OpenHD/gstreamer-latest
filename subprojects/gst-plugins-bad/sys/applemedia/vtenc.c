@@ -698,6 +698,15 @@ gst_vtenc_pause_output_loop (GstVTEnc * self)
   g_mutex_unlock (&self->queue_mutex);
 }
 
+static void
+gst_vtenc_set_flushing_flag (GstVTEnc * self)
+{
+  g_mutex_lock (&self->queue_mutex);
+  self->is_flushing = TRUE;
+  g_cond_signal (&self->queue_cond);
+  g_mutex_unlock (&self->queue_mutex);
+}
+
 static GstFlowReturn
 gst_vtenc_finish_encoding (GstVTEnc * self, gboolean is_flushing)
 {
@@ -712,17 +721,15 @@ gst_vtenc_finish_encoding (GstVTEnc * self, gboolean is_flushing)
   /* If output loop failed to push things downstream */
   if (self->downstream_ret != GST_FLOW_OK
       && self->downstream_ret != GST_FLOW_FLUSHING) {
+    /* Tells enqueue_buffer() to instantly discard any new encoded frames */
+    gst_vtenc_set_flushing_flag (self);
     GST_WARNING_OBJECT (self, "Output loop stopped with error (%s), leaving",
         gst_flow_get_name (self->downstream_ret));
     return self->downstream_ret;
   }
 
-  if (is_flushing) {
-    g_mutex_lock (&self->queue_mutex);
-    self->is_flushing = TRUE;
-    g_cond_signal (&self->queue_cond);
-    g_mutex_unlock (&self->queue_mutex);
-  }
+  if (is_flushing)
+    gst_vtenc_set_flushing_flag (self);
 
   if (!gst_vtenc_ensure_output_loop (self)) {
     GST_ERROR_OBJECT (self, "Output loop failed to resume");
@@ -768,14 +775,14 @@ gst_vtenc_start (GstVideoEncoder * enc)
   self->is_flushing = FALSE;
   self->downstream_ret = GST_FLOW_OK;
 
-  self->output_queue = gst_queue_array_new (0);
+  self->output_queue = gst_queue_array_new (VTENC_OUTPUT_QUEUE_SIZE);
   /* Set clear_func to unref all remaining frames in gst_queue_array_free() */
   gst_queue_array_set_clear_func (self->output_queue,
       (GDestroyNotify) gst_video_codec_frame_unref);
 
   /* Create the output task, but pause it immediately */
   self->pause_task = TRUE;
-  if (!gst_pad_start_task (GST_VIDEO_DECODER_SRC_PAD (enc),
+  if (!gst_pad_start_task (GST_VIDEO_ENCODER_SRC_PAD (enc),
           (GstTaskFunction) gst_vtenc_loop, self, NULL)) {
     GST_ERROR_OBJECT (self, "failed to start output thread");
     return FALSE;
@@ -1741,7 +1748,7 @@ gst_vtenc_encode_frame (GstVTEnc * self, GstVideoCodecFrame * frame)
 
   /* If this condition changes later while we're still in this function,
    * it'll just fail on next frame encode or in _finish() */
-  task_state = gst_pad_get_task_state (GST_VIDEO_DECODER_SRC_PAD (self));
+  task_state = gst_pad_get_task_state (GST_VIDEO_ENCODER_SRC_PAD (self));
   if (task_state == GST_TASK_STOPPED || task_state == GST_TASK_PAUSED) {
     /* Abort if our loop failed to push frames downstream... */
     if (self->downstream_ret != GST_FLOW_OK) {
@@ -2107,7 +2114,7 @@ gst_vtenc_loop (GstVTEnc * self)
   /* We need to empty the queue immediately so that enqueue_buffer() 
    * can push out the current buffer, otherwise it can block other
    * encoder callbacks completely */
-  if (ret == GST_FLOW_FLUSHING) {
+  if (ret != GST_FLOW_OK) {
     g_mutex_lock (&self->queue_mutex);
 
     while ((outframe = gst_queue_array_pop_head (self->output_queue))) {

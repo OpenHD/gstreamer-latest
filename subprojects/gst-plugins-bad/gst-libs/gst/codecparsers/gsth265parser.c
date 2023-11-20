@@ -1886,6 +1886,7 @@ gst_h265_parse_vps (GstH265NalUnit * nalu, GstH265VPS * vps)
 
   READ_UINT8 (&nr, vps->max_layers_minus1, 6);
   READ_UINT8 (&nr, vps->max_sub_layers_minus1, 3);
+  CHECK_ALLOWED (vps->max_sub_layers_minus1, 0, 6);
   READ_UINT8 (&nr, vps->temporal_id_nesting_flag, 1);
 
   /* skip reserved_0xffff_16bits */
@@ -2056,6 +2057,7 @@ gst_h265_parse_sps (GstH265Parser * parser, GstH265NalUnit * nalu,
   READ_UINT8 (&nr, sps->vps_id, 4);
 
   READ_UINT8 (&nr, sps->max_sub_layers_minus1, 3);
+  CHECK_ALLOWED (sps->max_sub_layers_minus1, 0, 6);
   READ_UINT8 (&nr, sps->temporal_id_nesting_flag, 1);
 
   if (!gst_h265_parse_profile_tier_level (&sps->profile_tier_level, &nr,
@@ -4665,7 +4667,7 @@ out:
  * The validation for completeness of @au and @sei is caller's responsibility.
  * Both @au and @sei must be byte-stream formatted
  *
- * Returns: (nullable): a SEI inserted #GstBuffer or %NULL
+ * Returns: (transfer full) (nullable): a SEI inserted #GstBuffer or %NULL
  *   if cannot figure out proper position to insert a @sei
  *
  * Since: 1.18
@@ -4695,7 +4697,7 @@ gst_h265_parser_insert_sei (GstH265Parser * parser, GstBuffer * au,
  * Nal prefix type of both @au and @sei must be packetized, and
  * also the size of nal length field must be identical to @nal_length_size
  *
- * Returns: (nullable): a SEI inserted #GstBuffer or %NULL
+ * Returns: (transfer full) (nullable): a SEI inserted #GstBuffer or %NULL
  *   if cannot figure out proper position to insert a @sei
  *
  * Since: 1.18
@@ -5072,13 +5074,15 @@ gst_h265_parser_parse_decoder_config_record (GstH265Parser * parser,
   g_assert (gst_bit_reader_get_pos (&br) == 23 * 8);
   for (i = 0; i < num_of_arrays; i++) {
     GstH265DecoderConfigRecordNalUnitArray array;
+    guint8 nalu_type;
     GstH265NalUnit nalu;
     guint16 num_nalu, j;
     guint offset;
 
     READ_CONFIG_UINT8 (array.array_completeness, 1);
     SKIP_CONFIG_BITS (1);
-    READ_CONFIG_UINT8 (array.nal_unit_type, 6);
+    READ_CONFIG_UINT8 (nalu_type, 6);
+    array.nal_unit_type = nalu_type;
 
     READ_CONFIG_UINT16 (num_nalu, 16);
 
@@ -5090,6 +5094,15 @@ gst_h265_parser_parse_decoder_config_record (GstH265Parser * parser,
           2, &nalu);
       if (result != GST_H265_PARSER_OK) {
         g_array_unref (array.nalu);
+        /* Ignores parsing error if this is the last nalu and not an essential
+         * nalu for decoding */
+        if (i + 1 == num_of_arrays && j + 1 == num_nalu &&
+            nalu_type != GST_H265_NAL_VPS && nalu_type != GST_H265_NAL_SPS &&
+            nalu_type != GST_H265_NAL_PPS) {
+          GST_WARNING ("Couldn't parse the last nalu, type %d at array %d / %d",
+              nalu_type, i, j);
+          goto out;
+        }
         goto error;
       }
 
@@ -5106,6 +5119,7 @@ gst_h265_parser_parse_decoder_config_record (GstH265Parser * parser,
     }
   }
 
+out:
   *config = ret;
   return GST_H265_PARSER_OK;
 

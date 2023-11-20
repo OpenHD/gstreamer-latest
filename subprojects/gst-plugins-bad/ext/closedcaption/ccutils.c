@@ -382,10 +382,8 @@ cc_data_extract_cea608 (const guint8 * cc_data, guint cc_data_len,
           return CC_DATA_EXTRACT_TOO_MANY_FIELD1;
         }
 
-        if (byte1 != 0x80 || byte2 != 0x80) {
-          cea608_field1[(*cea608_field1_len)++] = byte1;
-          cea608_field1[(*cea608_field1_len)++] = byte2;
-        }
+        cea608_field1[(*cea608_field1_len)++] = byte1;
+        cea608_field1[(*cea608_field1_len)++] = byte2;
       }
     } else if (cc_type == 0x01) {
       if (!cc_valid)
@@ -397,10 +395,8 @@ cc_data_extract_cea608 (const guint8 * cc_data, guint cc_data_len,
               *cea608_field2_len + 2);
           return CC_DATA_EXTRACT_TOO_MANY_FIELD2;
         }
-        if (byte1 != 0x80 || byte2 != 0x80) {
-          cea608_field2[(*cea608_field2_len)++] = byte1;
-          cea608_field2[(*cea608_field2_len)++] = byte2;
-        }
+        cea608_field2[(*cea608_field2_len)++] = byte1;
+        cea608_field2[(*cea608_field2_len)++] = byte2;
       }
     } else {
       /* all cea608 packets must be at the beginning of a cc_data */
@@ -437,6 +433,7 @@ struct _CCBuffer
   /* properties */
   GstClockTime max_buffer_time;
   gboolean output_padding;
+  gboolean output_ccp_padding;
 };
 
 G_DEFINE_TYPE (CCBuffer, cc_buffer, G_TYPE_OBJECT);
@@ -456,6 +453,7 @@ cc_buffer_init (CCBuffer * buf)
 
   buf->max_buffer_time = DEFAULT_MAX_BUFFER_TIME;
   buf->output_padding = TRUE;
+  buf->output_ccp_padding = FALSE;
 }
 
 static void
@@ -842,8 +840,32 @@ cc_buffer_take_separated (CCBuffer * buf,
           "small to hold output (%u)", *cc_data_len, write_ccp_size);
       *cc_data_len = 0;
     } else if (cc_data) {
+      guint ccp_padding = 0;
       memcpy (cc_data, buf->cc_data->data, write_ccp_size);
-      *cc_data_len = write_ccp_size;
+      if (buf->output_ccp_padding
+          && (write_ccp_size < 3 * fps_entry->max_ccp_count)) {
+        guint i;
+
+        ccp_padding = 3 * fps_entry->max_ccp_count - write_ccp_size;
+        GST_TRACE_OBJECT (buf, "need %u ccp padding bytes (%u - %u)",
+            ccp_padding, fps_entry->max_ccp_count, write_ccp_size);
+        for (i = 0; i < ccp_padding; i += 3) {
+          cc_data[i + write_ccp_size] = 0xfa;
+          cc_data[i + 1 + write_ccp_size] = 0x00;
+          cc_data[i + 2 + write_ccp_size] = 0x00;
+        }
+      }
+      *cc_data_len = write_ccp_size + ccp_padding;
+    } else if (buf->output_padding) {
+      guint i;
+      guint padding = 3 * fps_entry->max_ccp_count;
+      for (i = 0; i < padding; i += 3) {
+        cc_data[i + write_ccp_size] = 0xfa;
+        cc_data[i + 1 + write_ccp_size] = 0x00;
+        cc_data[i + 2 + write_ccp_size] = 0x00;
+      }
+      GST_TRACE_OBJECT (buf, "outputting only %u padding bytes", padding);
+      *cc_data_len = padding;
     } else {
       *cc_data_len = 0;
     }
@@ -878,6 +900,7 @@ cc_buffer_take_cc_data (CCBuffer * buf,
     guint cea608_output_count =
         write_cea608_1_size + write_cea608_2_size + field1_padding +
         field2_padding;
+    guint ccp_padding = 0;
 
     wrote_first = !buf->last_cea608_written_was_field1;
     while (cea608_1_i + cea608_2_i < cea608_output_count) {
@@ -929,7 +952,22 @@ cc_buffer_take_cc_data (CCBuffer * buf,
 
     if (write_ccp_size > 0)
       memcpy (&cc_data[out_i], buf->cc_data->data, write_ccp_size);
-    *cc_data_len = out_i + write_ccp_size;
+    if (buf->output_ccp_padding
+        && (write_ccp_size < 3 * fps_entry->max_ccp_count)) {
+      guint i;
+
+      ccp_padding = 3 * fps_entry->max_ccp_count - write_ccp_size;
+      GST_TRACE_OBJECT (buf, "need %u ccp padding bytes (%u - %u)", ccp_padding,
+          fps_entry->max_ccp_count, write_ccp_size);
+      for (i = 0; i < ccp_padding; i += 3) {
+        cc_data[i + out_i + write_ccp_size] = 0xfa;
+        cc_data[i + 1 + out_i + write_ccp_size] = 0x00;
+        cc_data[i + 2 + out_i + write_ccp_size] = 0x00;
+      }
+    }
+    *cc_data_len = out_i + write_ccp_size + ccp_padding;
+    GST_TRACE_OBJECT (buf, "cc_data_len is %u (%u + %u + %u)", *cc_data_len,
+        out_i, write_ccp_size, ccp_padding);
   }
 
   g_array_remove_range (buf->cea608_1, 0, write_cea608_1_size);
@@ -1014,7 +1052,9 @@ cc_buffer_set_max_buffer_time (CCBuffer * buf, GstClockTime max_time)
 }
 
 void
-cc_buffer_set_output_padding (CCBuffer * buf, gboolean output_padding)
+cc_buffer_set_output_padding (CCBuffer * buf, gboolean output_padding,
+    gboolean output_ccp_padding)
 {
   buf->output_padding = output_padding;
+  buf->output_ccp_padding = output_ccp_padding;
 }

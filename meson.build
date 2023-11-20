@@ -1,6 +1,6 @@
 project('gstreamer-full', 'c',
   version : '1.23.0.1',
-  meson_version : '>= 0.63.0',
+  meson_version : '>= 1.1',
   default_options : ['buildtype=debugoptimized',
                      # Needed due to https://github.com/mesonbuild/meson/issues/1889,
                      # but this can cause problems in the future. Remove it
@@ -33,12 +33,12 @@ endif
 # Install gst-indent pre-commit hook
 run_command(python3, '-c', 'import shutil; shutil.copy("scripts/git-hooks/multi-pre-commit.hook", ".git/hooks/pre-commit")', check: false)
 
-
-gitlint = find_program('gitlint', required: false)
+gitlint_req = '>= 0.18'
+gitlint = find_program('gitlint', version: gitlint_req, required: false)
 if gitlint.found()
   run_command(gitlint, 'install-hook', check: false)
 else
-  message('gitlint not found, please install it with your package manager or `python3 -m pip install gitlint` to enable the commit message hook')
+  message('gitlint not found or too old, please install it with your package manager or `python3 -m pip install gitlint` to enable the commit message hook')
 endif
 
 # On macOS, you have to run "Install Certificates.command" otherwise Python
@@ -86,17 +86,25 @@ endif
 
 building_full = get_option('default_library') == 'static'
 building_full_static = get_option('gst-full-target-type') == 'static_library'
-buildind_full_options = []
+building_full_options = []
 if building_full
-buildind_full_options = ['gstreamer-full=enabled']
+building_full_options = ['gstreamer-full=enabled']
 endif
+
+libnice_options = []
+if get_option('webrtc').enabled()
+  libnice_options += ['gstreamer=enabled']
+endif
+
+# Disable gst-python if we've disabled introspection
+gst_python_option = get_option('python').disable_if(get_option('introspection').disabled())
 
 # Ordered list of subprojects (dict has no ordering guarantees)
 subprojects = [
-  ['gstreamer', {'build-hotdoc': true, 'subproject_options': buildind_full_options}],
+  ['gstreamer', {'build-hotdoc': true, 'subproject_options': building_full_options}],
   ['gst-plugins-base', {'option': get_option('base'), 'build-hotdoc': true}],
   ['gst-plugins-good', {'option': get_option('good'), 'build-hotdoc': true}],
-  ['libnice', { 'option': get_option('libnice'), 'match_gst_version': false}],
+  ['libnice', { 'option': get_option('libnice'), 'match_gst_version': false, 'subproject_options': libnice_options}],
   ['gst-plugins-bad', { 'option': get_option('bad'), 'build-hotdoc': true}],
   ['gst-plugins-ugly', { 'option': get_option('ugly'), 'build-hotdoc': true}],
   ['gst-libav', { 'option': get_option('libav'), 'build-hotdoc': true}],
@@ -107,7 +115,7 @@ subprojects = [
   ['gstreamer-vaapi', { 'option': get_option('vaapi'), 'build-hotdoc': true}],
   ['gstreamer-sharp', { 'option': get_option('sharp') }],
   ['pygobject', { 'option': get_option('python'), 'match_gst_version': false, 'sysdep': 'pygobject-3.0', 'sysdep_version': '>= 3.8' }],
-  ['gst-python', { 'option': get_option('python')}],
+  ['gst-python', { 'option': gst_python_option}],
   ['gst-examples', { 'option': get_option('gst-examples'), 'match_gst_versions': false}],
   ['gst-plugins-rs', { 'option': get_option('rs'), 'build-hotdoc': true, 'match_gst_version': false}],
 ]
@@ -180,7 +188,7 @@ foreach sp : subprojects
     subproj = subproject(project_name, required: is_required, default_options: default_options)
   endif
 
-  if project_name == 'gst-plugins-base'
+  if project_name == 'gst-plugins-base' and subproj.found()
     gst_base_orc_req = subproj.get_variable('orc_req', '')
     if gst_base_orc_req != orc_req
       error('orc_req is "@0@" but it should be "@1@" from subprojects/gst-plugins-base/meson.build'
@@ -250,7 +258,7 @@ foreach pkgname_library : all_libraries
 endforeach
 
 custom_target('update_girs',
-  command: [find_program('scripts/update-girs.py'), meson.build_root()] + gir_files,
+  command: [find_program('scripts/update-girs.py'), meson.global_build_root()] + gir_files,
   output: 'update_girs',
   capture: true,
   depends: gir_targets
@@ -342,25 +350,39 @@ if building_full
   cdata = configuration_data()
   cdata.set_quoted('GST_API_VERSION', apiversion)
   cdata.set_quoted('GETTEXT_PACKAGE', 'gstreamer-full-1.0')
-  cdata.set_quoted('PACKAGE_VERSION', gst_version)
+  cdata.set_quoted('PACKAGE_VERSION', meson.project_version())
   cdata.set_quoted('GST_PACKAGE_ORIGIN', get_option('package-origin'))
+  cdata.set_quoted('GST_FULL_LICENSE', get_option('gstreamer-full-license'))
+  cdata.set_quoted('GST_PLUGIN_FULL_FEATURES_NAME', 'fullstaticfeatures')
   configure_file(output : 'config.h', configuration : cdata)
   configinc = include_directories('.')
   gst_c_args = ['-DHAVE_CONFIG_H']
 
   # Generate a .c file which declare and register all built plugins
-  all_plugin_names = ';'.join(plugins_names)
-
   static_plugins = get_option('gst-full-plugins')
+  plugins_to_be_initialized = []
   if static_plugins == '*'
-    static_plugins = all_plugin_names
+    all_plugin_names = ';'.join(plugins_names)
+  else
+    missing_plugins = []
+    foreach plugin : static_plugins.split(';')
+      if plugins_names.contains(plugin)
+        plugins_to_be_initialized += [plugin]
+      else
+        missing_plugins += [plugin]
+      endif
+    endforeach
+    if missing_plugins.length() > 0
+      error('Some gstreamer-full plugins enabled via the \'gst-full-plugins\' option are not available, please enable the corresponding meson options: @0@'.format(', '.join(missing_plugins)))
+    endif
+    all_plugin_names = ';'.join(plugins_to_be_initialized)
   endif
   generate_init_static_plugins = find_program('scripts/generate_init_static_plugins.py')
   init_static_plugins_c = configure_file(
     output: 'gstinitstaticplugins.c',
     command : [generate_init_static_plugins,
                '-o ' + '@OUTPUT@',
-               '-p ' + static_plugins,
+               '-p ' + all_plugin_names,
                '-e ' + get_option('gst-full-elements'),
                '-t ' + get_option('gst-full-typefind-functions'),
                '-d ' + get_option('gst-full-device-providers'),
@@ -400,6 +422,10 @@ if building_full
   # glib and gobject are part of our public API. If we are using glib from the
   # system then our pkg-config file must require it. If we built it as
   # subproject then we need to link_whole it.
+  # Note that link_whole dependencies aren't exposed transitively in
+  # Windows/Cygwin, because symbols from static libraries must
+  # be manually marked as exported through a module definition file.
+  # See e.g. https://github.com/FFmpeg/FFmpeg/blob/3057ce797f6e1348b978f5ffe9e2afd2224544f0/configure#L5726
   glib_deps = []
   glib_dep = dependency('glib-2.0')
   gobject_dep = dependency('gobject-2.0')
@@ -437,6 +463,7 @@ if building_full
   # Build shared library
   gstfull = build_target('gstreamer-full-1.0',
     init_static_plugins_c,
+    c_args: ['-DBUILDING_GST'] + gst_c_args,
     target_type: get_option('gst-full-target-type'),
     link_args: gstfull_link_args,
     link_whole : exposed_libs,
@@ -445,11 +472,18 @@ if building_full
     install : true,
   )
   gst_full_c_flags =  []
-  if building_full_static
+  if building_full_static or get_option('default_library') == 'static'
     gst_full_c_flags += ['-DGST_STATIC_COMPILATION']
   endif
 
-  gst_full_dep = declare_dependency(link_with: gstfull,
+  gst_full_libs = [gstfull]
+
+  # See above re: symbol exports in Win32
+  if ['windows', 'cygwin'].contains(host_machine.system())
+    gst_full_libs += exposed_libs
+  endif
+
+  gst_full_dep = declare_dependency(link_with: gst_full_libs,
     compile_args: gst_full_c_flags,
     dependencies : incdir_deps + glib_deps,
     include_directories: include_directories('.')

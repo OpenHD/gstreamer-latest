@@ -100,6 +100,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_dash_sink_debug);
  * GstDashSinkMuxerType:
  * @GST_DASH_SINK_MUXER_TS: Use mpegtsmux
  * @GST_DASH_SINK_MUXER_MP4: Use mp4mux
+ * @GST_DASH_SINK_MUXER_DASHMP4: Use dashmp4mux
  *
  * Muxer type
  */
@@ -107,6 +108,7 @@ typedef enum
 {
   GST_DASH_SINK_MUXER_TS = 0,
   GST_DASH_SINK_MUXER_MP4 = 1,
+  GST_DASH_SINK_MUXER_DASHMP4 = 2,
 } GstDashSinkMuxerType;
 
 typedef struct _DashSinkMuxer
@@ -124,7 +126,14 @@ gst_dash_sink_muxer_get_type (void)
   static GType dash_sink_muxer_type = 0;
   static const GEnumValue muxer_type[] = {
     {GST_DASH_SINK_MUXER_TS, "Use mpegtsmux", "ts"},
-    {GST_DASH_SINK_MUXER_MP4, "Use mp4mux", "mp4"},
+    {GST_DASH_SINK_MUXER_MP4, "Use mp4mux (deprecated, non-functional)", "mp4"},
+    /**
+     * GstDashSinkMuxerType::dashmp4
+     *
+     *
+     * Since: 1.24
+     */
+    {GST_DASH_SINK_MUXER_DASHMP4, "Use dashmp4mux", "dashmp4"},
     {0, NULL, NULL},
   };
 
@@ -144,6 +153,11 @@ static const DashSinkMuxer dash_muxer_list[] = {
   {
         GST_DASH_SINK_MUXER_MP4,
         "mp4mux",
+        "video/mp4",
+      "mp4"},
+  {
+        GST_DASH_SINK_MUXER_DASHMP4,
+        "dashmp4mux",
         "video/mp4",
       "mp4"},
 };
@@ -646,9 +660,13 @@ gst_dash_sink_add_splitmuxsink (GstDashSink * sink, GstDashSinkStream * stream)
       gst_element_factory_make (dash_muxer_list[sink->muxer].element_name,
       NULL);
 
-  if (sink->muxer == GST_DASH_SINK_MUXER_MP4)
+  if (sink->muxer == GST_DASH_SINK_MUXER_MP4) {
     g_object_set (mux, "fragment-duration", sink->target_duration * GST_MSECOND,
         NULL);
+  } else if (sink->muxer == GST_DASH_SINK_MUXER_DASHMP4) {
+    g_object_set (mux, "fragment-duration", sink->target_duration * GST_SECOND,
+        NULL);
+  }
 
   g_return_val_if_fail (mux != NULL, FALSE);
 
@@ -675,8 +693,11 @@ gst_dash_sink_add_splitmuxsink (GstDashSink * sink, GstDashSinkStream * stream)
   g_object_set (stream->splitmuxsink, "location", NULL,
       "max-size-time", ((GstClockTime) sink->target_duration * GST_SECOND),
       "send-keyframe-requests", TRUE, "muxer", mux, "sink",
-      stream->giostreamsink, "reset-muxer", FALSE, "send-keyframe-requests",
+      stream->giostreamsink, "send-keyframe-requests",
       sink->send_keyframe_requests, NULL);
+
+  if (sink->muxer == GST_DASH_SINK_MUXER_TS)
+    g_object_set (stream->splitmuxsink, "reset-muxer", FALSE, NULL);
 
   g_signal_connect (stream->splitmuxsink, "format-location",
       G_CALLBACK (on_format_location), stream);
@@ -723,23 +744,20 @@ gst_dash_sink_get_stream_metadata (GstDashSink * sink,
   GST_DEBUG_OBJECT (sink, "stream caps %s", gst_caps_to_string (caps));
   s = gst_caps_get_structure (caps, 0);
 
+  g_free (stream->codec);
+  stream->codec = gst_codec_utils_caps_get_mime_codec (caps);
+
   switch (stream->type) {
     case DASH_SINK_STREAM_TYPE_VIDEO:
     {
       gst_structure_get_int (s, "width", &stream->info.video.width);
       gst_structure_get_int (s, "height", &stream->info.video.height);
-      g_free (stream->codec);
-      stream->codec =
-          g_strdup (gst_mpd_helper_get_video_codec_from_mime (caps));
       break;
     }
     case DASH_SINK_STREAM_TYPE_AUDIO:
     {
       gst_structure_get_int (s, "channels", &stream->info.audio.channels);
       gst_structure_get_int (s, "rate", &stream->info.audio.rate);
-      g_free (stream->codec);
-      stream->codec =
-          g_strdup (gst_mpd_helper_get_audio_codec_from_mime (caps));
       break;
     }
     case DASH_SINK_STREAM_TYPE_SUBTITLE:

@@ -53,7 +53,7 @@ GST_DEBUG_CATEGORY_EXTERN (v4l2_debug);
 #define DEFAULT_PROP_TV_NORM            0
 #define DEFAULT_PROP_IO_MODE            GST_V4L2_IO_AUTO
 
-#define ENCODED_BUFFER_SIZE             (2 * 1024 * 1024)
+#define ENCODED_BUFFER_MIN_SIZE         (256 * 1024)
 #define GST_V4L2_DEFAULT_WIDTH          320
 #define GST_V4L2_DEFAULT_HEIGHT         240
 
@@ -2994,6 +2994,8 @@ gst_v4l2_object_probe_caps_for_format (GstV4l2Object * v4l2object,
     goto enum_framesizes_failed;
 
   if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+    guint32 maxw = 0, maxh = 0;
+
     do {
       GST_LOG_OBJECT (v4l2object->dbg_obj, "got discrete frame size %dx%d",
           size.discrete.width, size.discrete.height);
@@ -3010,8 +3012,16 @@ gst_v4l2_object_probe_caps_for_format (GstV4l2Object * v4l2object,
           results = g_list_prepend (results, tmp);
       }
 
+      if (w > maxw && h > maxh) {
+        maxw = w;
+        maxh = h;
+      }
+
       size.index++;
     } while (v4l2object->ioctl (fd, VIDIOC_ENUM_FRAMESIZES, &size) >= 0);
+
+    v4l2object->max_width = maxw;
+    v4l2object->max_height = maxh;
     GST_DEBUG_OBJECT (v4l2object->dbg_obj,
         "done iterating discrete frame sizes");
   } else if (size.type == V4L2_FRMSIZE_TYPE_STEPWISE) {
@@ -3057,6 +3067,9 @@ gst_v4l2_object_probe_caps_for_format (GstV4l2Object * v4l2object,
 
       /* no point using the results list here, since there's only one struct */
       gst_v4l2_object_update_and_append (v4l2object, pixelformat, ret, tmp);
+
+      v4l2object->max_width = maxw;
+      v4l2object->max_height = maxh;
     }
   } else if (size.type == V4L2_FRMSIZE_TYPE_CONTINUOUS) {
     guint32 maxw, maxh;
@@ -3086,6 +3099,9 @@ gst_v4l2_object_probe_caps_for_format (GstV4l2Object * v4l2object,
 
       /* no point using the results list here, since there's only one struct */
       gst_v4l2_object_update_and_append (v4l2object, pixelformat, ret, tmp);
+
+      v4l2object->max_width = maxw;
+      v4l2object->max_height = maxh;
     }
   } else {
     goto unknown_type;
@@ -3438,10 +3454,9 @@ gst_v4l2_object_set_stride (GstVideoInfo * info, GstVideoAlignment * align,
 
     padded_height = GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT (finfo, plane,
         info->height + align->padding_top + align->padding_bottom);
-    padded_height = (padded_height + tile_height - 1) / tile_height;
 
     x_tiles = stride / GST_VIDEO_FORMAT_INFO_TILE_STRIDE (finfo, plane);
-    y_tiles = padded_height / tile_height;
+    y_tiles = (padded_height + tile_height - 1) / tile_height;
     info->stride[plane] = GST_VIDEO_TILE_MAKE_STRIDE (x_tiles, y_tiles);
   } else {
     info->stride[plane] = stride;
@@ -3718,6 +3733,19 @@ field_to_str (enum v4l2_field f)
   return "unknown";
 }
 
+static guint
+calculate_max_sizeimage (GstV4l2Object * v4l2object, guint pixel_bitdepth)
+{
+  guint max_width, max_height;
+  guint sizeimage;
+
+  max_width = v4l2object->max_width;
+  max_height = v4l2object->max_height;
+  sizeimage = max_width * max_height * pixel_bitdepth / 8 / 2;
+
+  return MAX (ENCODED_BUFFER_MIN_SIZE, sizeimage);
+}
+
 static gboolean
 gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
     gboolean try_only, GstV4l2Error * error)
@@ -3731,6 +3759,7 @@ gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
   GstVideoInfo info;
   GstVideoAlignment align;
   gint width, height, fps_n, fps_d;
+  guint pixel_bitdepth = 8;
   gint n_v4l_planes;
   gint i = 0;
   gboolean is_mplane;
@@ -3929,6 +3958,14 @@ gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
       "%" GST_FOURCC_FORMAT " stride: %d", width, height,
       GST_FOURCC_ARGS (pixelformat), GST_VIDEO_INFO_PLANE_STRIDE (&info, 0));
 
+  s = gst_caps_get_structure (caps, 0);
+
+  if (gst_structure_has_field (s, "bit-depth-chroma")) {
+    gst_structure_get_uint (s, "bit-depth-chroma", &pixel_bitdepth);
+    GST_DEBUG_OBJECT (v4l2object->element, "Got pixel bit depth %u from caps",
+        pixel_bitdepth);
+  }
+
   memset (&format, 0x00, sizeof (struct v4l2_format));
   format.type = v4l2object->type;
 
@@ -3953,7 +3990,8 @@ gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
     }
 
     if (GST_VIDEO_INFO_FORMAT (&info) == GST_VIDEO_FORMAT_ENCODED)
-      format.fmt.pix_mp.plane_fmt[0].sizeimage = ENCODED_BUFFER_SIZE;
+      format.fmt.pix_mp.plane_fmt[0].sizeimage =
+          calculate_max_sizeimage (v4l2object, pixel_bitdepth);
   } else {
     gint stride = GST_VIDEO_INFO_PLANE_STRIDE (&info, 0);
 
@@ -3972,7 +4010,8 @@ gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
     format.fmt.pix.bytesperline = stride;
 
     if (GST_VIDEO_INFO_FORMAT (&info) == GST_VIDEO_FORMAT_ENCODED)
-      format.fmt.pix.sizeimage = ENCODED_BUFFER_SIZE;
+      format.fmt.pix.sizeimage =
+          calculate_max_sizeimage (v4l2object, pixel_bitdepth);
   }
 
   GST_DEBUG_OBJECT (v4l2object->dbg_obj, "Desired format is %dx%d, format "
@@ -4050,6 +4089,101 @@ gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
   if (format.fmt.pix.pixelformat != pixelformat)
     goto invalid_pixelformat;
 
+  /* Passing HDR10 information
+   *
+   * TODO:
+   *  - Missing capture (v4l2src) HDR10 configuration and/or reporting
+   *  - The API is not capable of HDR to HDR conversion as controls are not specific to queues
+   */
+  if (V4L2_TYPE_IS_OUTPUT (v4l2object->type)) {
+    GstVideoMasteringDisplayInfo video_master_display_info;
+    GstVideoContentLightLevel video_content_light_level;
+    struct v4l2_ext_control ext_control[2];
+    struct v4l2_ctrl_hdr10_mastering_display hdr10_mastering_display;
+    struct v4l2_ctrl_hdr10_cll_info hdr10_cll_info;
+    int count = 0;
+
+    GST_DEBUG_OBJECT (v4l2object->dbg_obj, "Passing HDR10 medata");
+    memset (&hdr10_cll_info, 0, sizeof (struct v4l2_ctrl_hdr10_cll_info));
+    memset (&hdr10_mastering_display,
+        0, sizeof (struct v4l2_ctrl_hdr10_mastering_display));
+
+    if (gst_video_mastering_display_info_from_caps (&video_master_display_info,
+            caps)) {
+      GST_DEBUG_OBJECT (v4l2object->dbg_obj,
+          "video mastering display info: %d:%d:%d:%d:%d:%d:%d:%d:%d:%d",
+          video_master_display_info.display_primaries[0].x,
+          video_master_display_info.display_primaries[0].y,
+          video_master_display_info.display_primaries[1].x,
+          video_master_display_info.display_primaries[1].y,
+          video_master_display_info.display_primaries[2].x,
+          video_master_display_info.display_primaries[2].y,
+          video_master_display_info.white_point.x,
+          video_master_display_info.white_point.y,
+          video_master_display_info.max_display_mastering_luminance,
+          video_master_display_info.min_display_mastering_luminance);
+
+      hdr10_mastering_display.display_primaries_x[2] =
+          video_master_display_info.display_primaries[0].x;
+      hdr10_mastering_display.display_primaries_y[2] =
+          video_master_display_info.display_primaries[0].y;
+      hdr10_mastering_display.display_primaries_x[0] =
+          video_master_display_info.display_primaries[1].x;
+      hdr10_mastering_display.display_primaries_y[0] =
+          video_master_display_info.display_primaries[1].y;
+      hdr10_mastering_display.display_primaries_x[1] =
+          video_master_display_info.display_primaries[2].x;
+      hdr10_mastering_display.display_primaries_y[1] =
+          video_master_display_info.display_primaries[2].y;
+      hdr10_mastering_display.white_point_x =
+          video_master_display_info.white_point.x;
+      hdr10_mastering_display.white_point_y =
+          video_master_display_info.white_point.y;
+      hdr10_mastering_display.min_display_mastering_luminance =
+          video_master_display_info.min_display_mastering_luminance;
+      hdr10_mastering_display.max_display_mastering_luminance =
+          video_master_display_info.max_display_mastering_luminance;
+
+      ext_control[count].id = V4L2_CID_COLORIMETRY_HDR10_MASTERING_DISPLAY;
+      ext_control[count].size =
+          sizeof (struct v4l2_ctrl_hdr10_mastering_display);
+      ext_control[count].ptr = &hdr10_mastering_display;
+      count++;
+    }
+
+    if (gst_video_content_light_level_from_caps (&video_content_light_level,
+            caps)) {
+      GST_DEBUG_OBJECT (v4l2object->dbg_obj, "video content light level: %d:%d",
+          video_content_light_level.max_content_light_level,
+          video_content_light_level.max_frame_average_light_level);
+
+      hdr10_cll_info.max_content_light_level =
+          video_content_light_level.max_content_light_level;
+      hdr10_cll_info.max_pic_average_light_level =
+          video_content_light_level.max_frame_average_light_level;
+
+      ext_control[count].id = V4L2_CID_COLORIMETRY_HDR10_CLL_INFO;
+      ext_control[count].size = sizeof (struct v4l2_ctrl_hdr10_cll_info);
+      ext_control[count].ptr = &hdr10_cll_info;
+      count++;
+    }
+
+    if (count != 0) {
+      struct v4l2_ext_controls ext_controls = {
+        .ctrl_class = V4L2_CTRL_CLASS_COLORIMETRY,
+        .count = count,
+        .controls = ext_control,
+      };
+
+      if (v4l2object->ioctl (fd, VIDIOC_S_EXT_CTRLS, &ext_controls) < 0) {
+        if (errno != ENOTTY) {
+          GST_WARNING_OBJECT (v4l2object->dbg_obj,
+              "Failed to set HDR10 metadata, err: %s", g_strerror (errno));
+        }
+      }
+    }
+  }
+
   /* Only negotiate size with raw data.
    * For some codecs the dimensions are *not* in the bitstream, IIRC VC1
    * in ASF mode for example, there is also not reason for a driver to
@@ -4070,8 +4204,6 @@ gst_v4l2_object_set_format_full (GstV4l2Object * v4l2object, GstCaps * caps,
     goto invalid_planes;
 
   /* used to check colorimetry and interlace mode fields presence */
-  s = gst_caps_get_structure (caps, 0);
-
   if (gst_v4l2_object_get_interlace_mode (format.fmt.pix.field,
           &info.interlace_mode)) {
     if (gst_structure_has_field (s, "interlace-mode")) {
@@ -4485,8 +4617,9 @@ gst_v4l2_object_acquire_format (GstV4l2Object * v4l2object, GstVideoInfo * info)
       goto unsupported_field;
   }
 
-  gst_video_info_set_interlaced_format (info, format, interlace_mode, width,
-      height);
+  if (!gst_video_info_set_interlaced_format (info, format, interlace_mode,
+          width, height))
+    goto invalid_dimensions;
 
   gst_v4l2_object_get_colorspace (v4l2object, &fmt, &info->colorimetry);
   gst_v4l2_object_get_streamparm (v4l2object, info);
@@ -5708,6 +5841,9 @@ again:
           "Received non-resolution source-change, ignoring.");
       goto again;
     }
+
+    if (v4l2object->formats)
+      gst_v4l2_object_clear_format_list (v4l2object);
 
     return GST_V4L2_FLOW_RESOLUTION_CHANGE;
   }

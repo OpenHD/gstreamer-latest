@@ -66,6 +66,8 @@ enum
 
   /* init params */
   PROP_PRESET,
+  PROP_TUNE,
+  PROP_MULTI_PASS,
   PROP_WEIGHTED_PRED,
 
   /* encoding config */
@@ -108,7 +110,9 @@ enum
   PROP_REPEAT_SEQUENCE_HEADER,
 };
 
-#define DEFAULT_PRESET            GST_NV_ENCODER_PRESET_DEFAULT
+#define DEFAULT_PRESET            GST_NV_ENCODER_PRESET_P4
+#define DEFAULT_TUNE              GST_NV_ENCODER_TUNE_DEFAULT
+#define DEFAULT_MULTI_PASS        GST_NV_ENCODER_MULTI_PASS_DEFAULT
 #define DEFAULT_WEIGHTED_PRED     FALSE
 #define DEFAULT_GOP_SIZE          30
 #define DEFAULT_B_FRAMES          0
@@ -158,6 +162,8 @@ typedef struct _GstNvH265Encoder
   gint64 adapter_luid;
 
   GstNvEncoderPreset preset;
+  GstNvEncoderMultiPass multipass;
+  GstNvEncoderTune tune;
   gboolean weighted_pred;
 
   gint gop_size;
@@ -303,6 +309,14 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
       g_param_spec_enum ("preset", "Encoding Preset",
           "Encoding Preset", GST_TYPE_NV_ENCODER_PRESET,
           DEFAULT_PRESET, param_flags));
+  g_object_class_install_property (object_class, PROP_TUNE,
+      g_param_spec_enum ("tune", "Tune",
+          "Encoding tune", GST_TYPE_NV_ENCODER_TUNE,
+          DEFAULT_TUNE, param_flags));
+  g_object_class_install_property (object_class, PROP_MULTI_PASS,
+      g_param_spec_enum ("multi-pass", "Multi Pass",
+          "Multi pass encoding", GST_TYPE_NV_ENCODER_MULTI_PASS,
+          DEFAULT_MULTI_PASS, param_flags));
   if (dev_caps->weighted_prediction) {
     g_object_class_install_property (object_class, PROP_WEIGHTED_PRED,
         g_param_spec_boolean ("weighted-pred", "Weighted Pred",
@@ -502,6 +516,8 @@ gst_nv_h265_encoder_init (GstNvH265Encoder * self)
   self->cuda_device_id = klass->cuda_device_id;
   self->adapter_luid = klass->adapter_luid;
   self->preset = DEFAULT_PRESET;
+  self->tune = DEFAULT_TUNE;
+  self->multipass = DEFAULT_MULTI_PASS;
   self->weighted_pred = DEFAULT_WEIGHTED_PRED;
   self->gop_size = DEFAULT_GOP_SIZE;
   self->bframes = DEFAULT_B_FRAMES;
@@ -699,6 +715,23 @@ gst_nv_h265_encoder_set_property (GObject * object, guint prop_id,
       }
       break;
     }
+    case PROP_TUNE:{
+      GstNvEncoderTune tune = (GstNvEncoderTune) g_value_get_enum (value);
+      if (tune != self->tune) {
+        self->tune = tune;
+        self->init_param_updated = TRUE;
+      }
+      break;
+    }
+    case PROP_MULTI_PASS:{
+      GstNvEncoderMultiPass multipass =
+          (GstNvEncoderMultiPass) g_value_get_enum (value);
+      if (multipass != self->multipass) {
+        self->multipass = multipass;
+        self->init_param_updated = TRUE;
+      }
+      break;
+    }
     case PROP_WEIGHTED_PRED:
       update_boolean (self, &self->weighted_pred, value, UPDATE_INIT_PARAM);
       break;
@@ -813,6 +846,12 @@ gst_nv_h265_encoder_get_property (GObject * object, guint prop_id,
       break;
     case PROP_PRESET:
       g_value_set_enum (value, self->preset);
+      break;
+    case PROP_TUNE:
+      g_value_set_enum (value, self->tune);
+      break;
+    case PROP_MULTI_PASS:
+      g_value_set_enum (value, self->multipass);
       break;
     case PROP_WEIGHTED_PRED:
       g_value_set_boolean (value, self->weighted_pred);
@@ -991,8 +1030,10 @@ gst_nv_h265_encoder_getcaps (GstVideoEncoder * encoder, GstCaps * filter)
       allowed_formats.insert("P010_10LE");
     } else if (iter == "main-444") {
       allowed_formats.insert("Y444");
+      allowed_formats.insert("GBR");
     } else if (iter == "main-444-10") {
       allowed_formats.insert("Y444_16LE");
+      allowed_formats.insert("GBR_16LE");
     }
   }
   /* *INDENT-ON* */
@@ -1053,7 +1094,6 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
   NVENCSTATUS status;
   NV_ENC_PRESET_CONFIG preset_config = { 0, };
   gint dar_n, dar_d;
-  GstNvEncoderRCMode rc_mode;
   NV_ENC_CONFIG_HEVC *hevc_config;
   NV_ENC_CONFIG_HEVC_VUI_PARAMETERS *vui;
   std::set < std::string > downstream_profiles;
@@ -1096,6 +1136,7 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
       }
       break;
     case GST_VIDEO_FORMAT_Y444:
+    case GST_VIDEO_FORMAT_GBR:
       if (downstream_profiles.find ("main-444") == downstream_profiles.end ()) {
         GST_ERROR_OBJECT (self, "Downstream does not support 4:4:4 profile");
         return FALSE;
@@ -1105,6 +1146,7 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
       }
       break;
     case GST_VIDEO_FORMAT_Y444_16LE:
+    case GST_VIDEO_FORMAT_GBR_16LE:
       if (downstream_profiles.find ("main-444-10") ==
           downstream_profiles.end ()) {
         GST_ERROR_OBJECT (self,
@@ -1199,13 +1241,14 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
     init_params->darHeight = dar_d;
   }
 
-  gst_nv_encoder_preset_to_guid (self->preset, &init_params->presetGUID);
+  gst_nv_encoder_preset_to_native (self->preset, self->tune,
+      &init_params->presetGUID, &init_params->tuningInfo);
 
   preset_config.version = gst_nvenc_get_preset_config_version ();
   preset_config.presetCfg.version = gst_nvenc_get_config_version ();
 
-  status = NvEncGetEncodePresetConfig (session, NV_ENC_CODEC_HEVC_GUID,
-      init_params->presetGUID, &preset_config);
+  status = NvEncGetEncodePresetConfigEx (session, NV_ENC_CODEC_HEVC_GUID,
+      init_params->presetGUID, init_params->tuningInfo, &preset_config);
   if (!gst_nv_enc_result (status, self)) {
     GST_ERROR_OBJECT (self, "Failed to get preset config");
     g_mutex_unlock (&self->prop_lock);
@@ -1232,7 +1275,6 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
   }
 
   rc_params = &config->rcParams;
-  rc_mode = self->rc_mode;
 
   if (self->bitrate)
     rc_params->averageBitRate = self->bitrate * 1024;
@@ -1271,7 +1313,10 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
     }
   }
 
-  if (rc_mode == GST_NV_ENCODER_RC_MODE_CONSTQP) {
+  gst_nv_encoder_rc_mode_to_native (self->rc_mode, self->multipass,
+      &rc_params->rateControlMode, &rc_params->multiPass);
+
+  if (rc_params->rateControlMode == NV_ENC_PARAMS_RC_CONSTQP) {
     if (self->qp_i >= 0)
       rc_params->constQP.qpIntra = self->qp_i;
     if (self->qp_p >= 0)
@@ -1279,8 +1324,6 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
     if (self->qp_b >= 0)
       rc_params->constQP.qpInterB = self->qp_b;
   }
-
-  rc_params->rateControlMode = gst_nv_encoder_rc_mode_to_native (rc_mode);
 
   if (self->spatial_aq) {
     rc_params->enableAQ = TRUE;
@@ -1341,7 +1384,19 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
   }
 
   vui->colourDescriptionPresentFlag = 1;
-  vui->colourMatrix = gst_video_color_matrix_to_iso (info->colorimetry.matrix);
+  switch (GST_VIDEO_INFO_FORMAT (info)) {
+    case GST_VIDEO_FORMAT_GBR:
+    case GST_VIDEO_FORMAT_GBR_16LE:
+      /* color matrix must be "Identity" */
+      vui->colourMatrix =
+          gst_video_color_matrix_to_iso (GST_VIDEO_COLOR_MATRIX_RGB);
+      break;
+    default:
+      vui->colourMatrix =
+          gst_video_color_matrix_to_iso (info->colorimetry.matrix);
+      break;
+  }
+
   vui->colourPrimaries =
       gst_video_color_primaries_to_iso (info->colorimetry.primaries);
   vui->transferCharacteristics =
@@ -1903,6 +1958,17 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
   GstNvEncoderClassData *cdata;
   GstCaps *sink_caps;
   GstCaps *system_caps;
+  NV_ENC_PRESET_CONFIG preset_config = { 0, };
+
+  preset_config.version = gst_nvenc_get_preset_config_version ();
+  preset_config.presetCfg.version = gst_nvenc_get_config_version ();
+
+  status = NvEncGetEncodePresetConfigEx (session, NV_ENC_CODEC_HEVC_GUID,
+      NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO_HIGH_QUALITY, &preset_config);
+  if (status != NV_ENC_SUCCESS) {
+    GST_WARNING_OBJECT (device, "New preset is not supported");
+    return nullptr;
+  }
 
   status = NvEncGetEncodeProfileGUIDs (session, NV_ENC_CODEC_HEVC_GUID,
       profile_guids, G_N_ELEMENTS (profile_guids), &profile_guid_count);
@@ -1926,16 +1992,20 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
         formats.insert ("NV12");
         break;
       case NV_ENC_BUFFER_FORMAT_YUV444:
-        if (dev_caps.yuv444_encode)
+        if (dev_caps.yuv444_encode) {
           formats.insert ("Y444");
+          formats.insert ("GBR");
+        }
         break;
       case NV_ENC_BUFFER_FORMAT_YUV420_10BIT:
         if (dev_caps.supports_10bit_encode)
           formats.insert ("P010_10LE");
         break;
       case NV_ENC_BUFFER_FORMAT_YUV444_10BIT:
-        if (dev_caps.supports_10bit_encode && dev_caps.yuv444_encode)
+        if (dev_caps.supports_10bit_encode && dev_caps.yuv444_encode) {
           formats.insert ("Y444_16LE");
+          formats.insert ("GBR_16LE");
+        }
         break;
       default:
         break;
@@ -1965,6 +2035,8 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
     APPEND_STRING (format_str, formats, "P010_10LE");
     APPEND_STRING (format_str, formats, "Y444");
     APPEND_STRING (format_str, formats, "Y444_16LE");
+    APPEND_STRING (format_str, formats, "GBR");
+    APPEND_STRING (format_str, formats, "GBR_16LE");
     format_str += " }";
   }
 
@@ -2258,13 +2330,13 @@ gst_nv_h265_encoder_register_auto_select (GstPlugin * plugin,
       profiles.insert ((gchar *) walk->data);
 
     if (cdata->device_mode == GST_NV_ENCODER_DEVICE_D3D11 &&
-        adapter_luid_size < G_N_ELEMENTS (adapter_luid_list) - 1) {
+        adapter_luid_size <= G_N_ELEMENTS (adapter_luid_list) - 1) {
       adapter_luid_list[adapter_luid_size] = cdata->adapter_luid;
       adapter_luid_size++;
     }
 
     if (cdata->device_mode == GST_NV_ENCODER_DEVICE_CUDA &&
-        cuda_device_id_size < G_N_ELEMENTS (cuda_device_id_list) - 1) {
+        cuda_device_id_size <= G_N_ELEMENTS (cuda_device_id_list) - 1) {
       cuda_device_id_list[cuda_device_id_size] = cdata->cuda_device_id;
       cuda_device_id_size++;
     }
@@ -2301,6 +2373,8 @@ gst_nv_h265_encoder_register_auto_select (GstPlugin * plugin,
     APPEND_STRING (format_str, formats, "P010_10LE");
     APPEND_STRING (format_str, formats, "Y444");
     APPEND_STRING (format_str, formats, "Y444_16LE");
+    APPEND_STRING (format_str, formats, "GBR");
+    APPEND_STRING (format_str, formats, "GBR_16LE");
     format_str += " }";
   }
 

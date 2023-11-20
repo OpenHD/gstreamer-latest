@@ -172,6 +172,8 @@ gst_gl_format_from_video_info (GstGLContext * context,
     case GST_VIDEO_FORMAT_VUYA:
       n_plane_components = 4;
       break;
+    case GST_VIDEO_FORMAT_RGBA64_LE:
+    case GST_VIDEO_FORMAT_RGBA64_BE:
     case GST_VIDEO_FORMAT_ARGB64:
       return GST_GL_RGBA16;
     case GST_VIDEO_FORMAT_RGB:
@@ -206,6 +208,8 @@ gst_gl_format_from_video_info (GstGLContext * context,
     case GST_VIDEO_FORMAT_I420:
     case GST_VIDEO_FORMAT_YV12:
     case GST_VIDEO_FORMAT_A420:
+    case GST_VIDEO_FORMAT_A422:
+    case GST_VIDEO_FORMAT_A444:
       n_plane_components = 1;
       break;
     case GST_VIDEO_FORMAT_BGR10A2_LE:
@@ -231,6 +235,29 @@ gst_gl_format_from_video_info (GstGLContext * context,
     case GST_VIDEO_FORMAT_BGRP:
     case GST_VIDEO_FORMAT_GBRA:
       return GST_GL_R8;
+    case GST_VIDEO_FORMAT_I420_10LE:
+    case GST_VIDEO_FORMAT_I420_10BE:
+    case GST_VIDEO_FORMAT_I420_12LE:
+    case GST_VIDEO_FORMAT_I420_12BE:
+    case GST_VIDEO_FORMAT_A420_10LE:
+    case GST_VIDEO_FORMAT_A420_10BE:
+    case GST_VIDEO_FORMAT_A420_12LE:
+    case GST_VIDEO_FORMAT_A420_12BE:
+    case GST_VIDEO_FORMAT_A420_16LE:
+    case GST_VIDEO_FORMAT_A420_16BE:
+    case GST_VIDEO_FORMAT_A422_10LE:
+    case GST_VIDEO_FORMAT_A422_10BE:
+    case GST_VIDEO_FORMAT_A422_12LE:
+    case GST_VIDEO_FORMAT_A422_12BE:
+    case GST_VIDEO_FORMAT_A422_16LE:
+    case GST_VIDEO_FORMAT_A422_16BE:
+    case GST_VIDEO_FORMAT_A444_10LE:
+    case GST_VIDEO_FORMAT_A444_10BE:
+    case GST_VIDEO_FORMAT_A444_12LE:
+    case GST_VIDEO_FORMAT_A444_12BE:
+    case GST_VIDEO_FORMAT_A444_16LE:
+    case GST_VIDEO_FORMAT_A444_16BE:
+      return GST_GL_R16;
     default:
       n_plane_components = 4;
       g_assert_not_reached ();
@@ -466,8 +493,23 @@ get_single_planar_format_gl_swizzle_order (GstVideoFormat format,
   g_return_if_fail (finfo->flags & GST_VIDEO_FORMAT_FLAG_RGB
       || format == GST_VIDEO_FORMAT_AYUV || format == GST_VIDEO_FORMAT_VUYA);
 
+  if (format == GST_VIDEO_FORMAT_BGR10A2_LE) {
+    swizzle[0] = 2;
+    swizzle[1] = 1;
+    swizzle[2] = 0;
+    swizzle[3] = 3;
+    return;
+  }
+  if (format == GST_VIDEO_FORMAT_RGB10A2_LE) {
+    swizzle[0] = 0;
+    swizzle[1] = 1;
+    swizzle[2] = 2;
+    swizzle[3] = 3;
+    return;
+  }
+
   for (i = 0; i < finfo->n_components; i++) {
-    swizzle[c_i++] = finfo->poffset[i];
+    swizzle[c_i++] = finfo->poffset[i] / (GST_ROUND_UP_8 (finfo->bits) / 8);
   }
 
   /* special case spaced RGB formats as the space does not contain a poffset
@@ -510,7 +552,10 @@ gst_gl_video_format_swizzle (GstVideoFormat video_format, int *swizzle)
 {
   const GstVideoFormatInfo *finfo = gst_video_format_get_info (video_format);
 
-  if (finfo->n_planes == 1) {
+  if (finfo->n_planes == 1 &&
+      (finfo->flags & GST_VIDEO_FORMAT_FLAG_RGB ||
+          video_format == GST_VIDEO_FORMAT_AYUV ||
+          video_format == GST_VIDEO_FORMAT_VUYA)) {
     get_single_planar_format_gl_swizzle_order (video_format, swizzle);
     return TRUE;
   }
@@ -534,10 +579,34 @@ gst_gl_video_format_swizzle (GstVideoFormat video_format, int *swizzle)
     case GST_VIDEO_FORMAT_NV12_16L32S:
     case GST_VIDEO_FORMAT_NV12_4L4:
     case GST_VIDEO_FORMAT_I420:
+    case GST_VIDEO_FORMAT_I420_10LE:
+    case GST_VIDEO_FORMAT_I420_10BE:
+    case GST_VIDEO_FORMAT_I420_12LE:
+    case GST_VIDEO_FORMAT_I420_12BE:
     case GST_VIDEO_FORMAT_Y444:
     case GST_VIDEO_FORMAT_Y42B:
     case GST_VIDEO_FORMAT_Y41B:
     case GST_VIDEO_FORMAT_A420:
+    case GST_VIDEO_FORMAT_A420_10LE:
+    case GST_VIDEO_FORMAT_A420_10BE:
+    case GST_VIDEO_FORMAT_A420_12LE:
+    case GST_VIDEO_FORMAT_A420_12BE:
+    case GST_VIDEO_FORMAT_A420_16LE:
+    case GST_VIDEO_FORMAT_A420_16BE:
+    case GST_VIDEO_FORMAT_A422:
+    case GST_VIDEO_FORMAT_A422_10LE:
+    case GST_VIDEO_FORMAT_A422_10BE:
+    case GST_VIDEO_FORMAT_A422_12LE:
+    case GST_VIDEO_FORMAT_A422_12BE:
+    case GST_VIDEO_FORMAT_A422_16LE:
+    case GST_VIDEO_FORMAT_A422_16BE:
+    case GST_VIDEO_FORMAT_A444:
+    case GST_VIDEO_FORMAT_A444_10LE:
+    case GST_VIDEO_FORMAT_A444_10BE:
+    case GST_VIDEO_FORMAT_A444_12LE:
+    case GST_VIDEO_FORMAT_A444_12BE:
+    case GST_VIDEO_FORMAT_A444_16LE:
+    case GST_VIDEO_FORMAT_A444_16BE:
       swizzle[0] = 0;
       swizzle[1] = 1;
       swizzle[2] = 2;

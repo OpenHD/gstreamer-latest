@@ -49,19 +49,18 @@ GST_VA_API
 void                  gst_va_dmabuf_allocator_flush       (GstAllocator * allocator);
 GST_VA_API
 gboolean              gst_va_dmabuf_allocator_set_format  (GstAllocator * allocator,
-                                                           GstVideoInfo * info,
+                                                           GstVideoInfoDmaDrm * info,
                                                            guint usage_hint);
 GST_VA_API
 gboolean              gst_va_dmabuf_allocator_get_format  (GstAllocator * allocator,
-                                                           GstVideoInfo * info,
+                                                           GstVideoInfoDmaDrm * info,
                                                            guint * usage_hint);
 
 GST_VA_API
 gboolean              gst_va_dmabuf_memories_setup        (GstVaDisplay * display,
-                                                           GstVideoInfo * info,
-                                                           guint n_planes,
+                                                           GstVideoInfoDmaDrm * drm_info,
                                                            GstMemory * mem[GST_VIDEO_MAX_PLANES],
-                                                           uintptr_t * fds,
+                                                           uintptr_t fds[GST_VIDEO_MAX_PLANES],
                                                            gsize offset[GST_VIDEO_MAX_PLANES],
                                                            guint usage_hint);
 

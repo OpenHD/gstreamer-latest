@@ -42,15 +42,10 @@
 #define GST_CAT_DEFAULT gst_debug_gtk_wayland_sink
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
-#define WL_VIDEO_FORMATS \
-  "{ BGRx, BGRA, RGBx, xBGR, xRGB, RGBA, ABGR, ARGB, RGB, BGR, " \
-  "RGB16, BGR16, YUY2, YVYU, UYVY, AYUV, NV12, NV21, NV16, NV61, " \
-  "YUV9, YVU9, Y41B, I420, YV12, Y42B, v308 }"
-
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE (WL_VIDEO_FORMATS) ";"
+    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE (GST_WL_VIDEO_FORMATS) ";"
         GST_VIDEO_DMA_DRM_CAPS_MAKE)
     );
 
@@ -894,7 +889,7 @@ gst_gtk_wayland_activate_shm_pool (GstGtkWaylandSink * self)
     gboolean is_shm = FALSE;
 
     if (gst_buffer_pool_config_get_allocator (config, &alloc, NULL) && alloc)
-      is_shm = GST_IS_WL_SHM_ALLOCATOR (alloc);
+      is_shm = GST_IS_SHM_ALLOCATOR (alloc);
 
     gst_structure_free (config);
 
@@ -902,7 +897,7 @@ gst_gtk_wayland_activate_shm_pool (GstGtkWaylandSink * self)
       return TRUE;
   }
 
-  alloc = gst_wl_shm_allocator_get ();
+  alloc = gst_shm_allocator_get ();
   gst_gtk_wayland_update_pool (self, alloc);
   gst_object_unref (alloc);
 
@@ -1064,7 +1059,7 @@ gst_gtk_wayland_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
     gst_buffer_pool_config_set_params (config,
         caps, priv->video_info.size, 2, 0);
     gst_buffer_pool_config_set_allocator (config,
-        gst_wl_shm_allocator_get (), NULL);
+        gst_shm_allocator_get (), NULL);
     gst_buffer_pool_set_config (pool, config);
   }
 
@@ -1072,7 +1067,7 @@ gst_gtk_wayland_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
   if (pool)
     g_object_unref (pool);
 
-  alloc = gst_wl_shm_allocator_get ();
+  alloc = gst_shm_allocator_get ();
   gst_query_add_allocation_param (query, alloc, NULL);
   gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
   g_object_unref (alloc);
@@ -1197,12 +1192,12 @@ gst_gtk_wayland_sink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
       wbuf = gst_wl_linux_dmabuf_construct_wl_buffer (buffer, priv->display,
           &priv->drm_info);
 
-    /* DMABuf did not work, let try and make this a dmabuf, it does not matter
-     * if it was a SHM since the compositor needs to copy that anyway, and
-     * offloading the compositor from a copy helps maintaining a smoother
-     * desktop.
-     */
-    if (!priv->skip_dumb_buffer_copy) {
+    if (!wbuf && !priv->skip_dumb_buffer_copy) {
+      /* DMABuf did not work, let try and make this a dmabuf, it does not matter
+       * if it was a SHM since the compositor needs to copy that anyway, and
+       * offloading the compositor from a copy helps maintaining a smoother
+       * desktop.
+       */
       GstVideoFrame src, dst;
 
       if (!gst_gtk_wayland_activate_drm_dumb_pool (self)) {

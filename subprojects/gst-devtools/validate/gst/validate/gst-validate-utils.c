@@ -1107,7 +1107,7 @@ gst_validate_object_set_property_full (GstValidateReporter * reporter,
   return res;
 }
 
-#ifdef G_OS_UNIX
+#if defined (G_OS_UNIX) && !defined (__APPLE__)
 static void
 fault_restore (void)
 {
@@ -1171,12 +1171,12 @@ fault_setup (void)
   sigaction (SIGSEGV, &action, NULL);
   sigaction (SIGQUIT, &action, NULL);
 }
-#endif /* G_OS_UNIX */
+#endif /* G_OS_UNIX && !__APPLE__ */
 
 void
 gst_validate_spin_on_fault_signals (void)
 {
-#ifdef G_OS_UNIX
+#if defined (G_OS_UNIX) && !defined (__APPLE__)
   fault_setup ();
 #endif
 }
@@ -1267,6 +1267,10 @@ gst_validate_replace_variables_in_string (gpointer source,
       }
 
       if (!var_value) {
+        g_free (varname);
+        g_free (pvarname);
+        g_free (string);
+        g_clear_pointer (&match_info, g_match_info_free);
         if (!(flags & GST_VALIDATE_STRUCTURE_RESOLVE_VARIABLES_NO_FAILURE)) {
           gst_validate_error_structure (source,
               "Trying to use undefined variable `%s`.\n"
@@ -1276,6 +1280,7 @@ gst_validate_replace_variables_in_string (gpointer source,
               varname, gst_structure_to_string (local_vars),
               (flags & GST_VALIDATE_STRUCTURE_RESOLVE_VARIABLES_LOCAL_ONLY) ?
               ": unused" : gst_structure_to_string (global_vars));
+
         }
 
         return NULL;

@@ -37,7 +37,7 @@ if host_system != 'windows' or d3d11_option.disabled()
   subdir_done()
 endif
 
-if not gstd3d11_dep.found() or not cc.has_header('dxva.h') or not cc.has_header('d3d9.h')
+if not gstd3d11_dep.found() or not gstdxva_dep.found()
   if d3d11_option.enabled()
     error('The d3d11 was enabled explicitly, but required dependencies were not found.')
   endif
@@ -123,13 +123,20 @@ if cc.get_id() != 'msvc'
   extra_args += extra_mingw_args
 endif
 
+hlsl_precompiled = []
+fxc = find_program ('fxc', required : get_option ('d3d11-hlsl-precompile'))
+if cc.get_id() == 'msvc' and fxc.found()
+  subdir('hlsl')
+  extra_args += ['-DHLSL_PRECOMPILED']
+endif
+
 gstd3d11 = library('gstd3d11',
-  d3d11_sources,
+  d3d11_sources + hlsl_precompiled,
   c_args : gst_plugins_bad_args + extra_c_args + extra_args,
   cpp_args: gst_plugins_bad_args + extra_args,
   include_directories : [configinc],
   dependencies : [gstbase_dep, gstvideo_dep, gmodule_dep, gstcontroller_dep,
-                  gstd3d11_dep, gstcodecs_dep, d2d_dep] + extra_dep,
+                  gstd3d11_dep, gstdxva_dep, d2d_dep, directxmath_dep] + extra_dep,
   install : true,
   install_dir : plugins_install_dir,
 )

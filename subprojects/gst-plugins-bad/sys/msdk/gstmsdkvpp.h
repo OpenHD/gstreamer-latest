@@ -56,6 +56,7 @@ typedef enum {
   GST_MSDK_FLAG_SCALING_MODE = 1 << 9,
   GST_MSDK_FLAG_FRC          = 1 << 10,
   GST_MSDK_FLAG_VIDEO_DIRECTION = 1 << 11,
+  GST_MSDK_FLAG_TONE_MAPPING = 1 << 12,
 } GstMsdkVppFlags;
 
 struct _GstMsdkVPP
@@ -88,6 +89,9 @@ struct _GstMsdkVPP
   gboolean add_video_meta;
   gboolean need_vpp;
   guint flags;
+  /* To check if sinkcaps have HDR SEIs*/
+  gboolean have_mdcv;
+  gboolean have_cll;
 
   /* element properties */
   gboolean hardware;
@@ -110,6 +114,7 @@ struct _GstMsdkVPP
   guint crop_right;
   guint crop_top;
   guint crop_bottom;
+  gboolean hdr_tone_mapping;
 
   GstClockTime buffer_duration;
 
@@ -124,13 +129,23 @@ struct _GstMsdkVPP
   mfxExtVPPScaling mfx_scaling;
   mfxExtVPPFrameRateConversion mfx_frc;
 
+  GstVideoMasteringDisplayInfo mdcv_info;
+  GstVideoContentLightLevel cll_info;
+
   /* Extended buffers */
   mfxExtBuffer *extra_params[MAX_EXTRA_PARAMS];
   guint num_extra_params;
 
+  mfxExtVideoSignalInfo in_vsi;
+  mfxExtVideoSignalInfo out_vsi;
+  mfxExtMasteringDisplayColourVolume mdcv;
+  mfxExtContentLightLevelInfo cll;
+
   mfxFrameAllocRequest request[2];
   GList* locked_in_surfaces;
   GList* locked_out_surfaces;
+
+  mfxVersion version;
 };
 
 struct _GstMsdkVPPClass

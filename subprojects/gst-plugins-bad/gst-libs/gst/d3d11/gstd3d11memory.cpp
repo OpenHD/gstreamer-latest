@@ -988,8 +988,12 @@ create_render_target_views (GstD3D11Memory * mem)
     return FALSE;
   }
 
-  render_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-  render_desc.Texture2D.MipSlice = 0;
+  if (priv->desc.SampleDesc.Count > 1) {
+    render_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+  } else {
+    render_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    render_desc.Texture2D.MipSlice = 0;
+  }
 
   for (i = 0; i < num_views; i++) {
     render_desc.Format = formats[i];
@@ -1416,8 +1420,6 @@ gboolean
 gst_d3d11_memory_get_nt_handle (GstD3D11Memory * mem, HANDLE * handle)
 {
   GstD3D11MemoryPrivate *priv;
-  const guint misc_flags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
-      D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
   ComPtr < IDXGIResource1 > resource;
   HRESULT hr;
 
@@ -1437,8 +1439,10 @@ gst_d3d11_memory_get_nt_handle (GstD3D11Memory * mem, HANDLE * handle)
     return TRUE;
   }
 
-  if ((priv->desc.MiscFlags & misc_flags) != misc_flags)
+  if ((priv->desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) !=
+      D3D11_RESOURCE_MISC_SHARED_NTHANDLE) {
     return FALSE;
+  }
 
   hr = priv->texture->QueryInterface (IID_PPV_ARGS (&resource));
   if (!gst_d3d11_result (hr, mem->device))

@@ -41,6 +41,7 @@ pub mod unix {
     pub const POLLNVAL: c_short = 0x20;
 
     pub const IPPROTO_IP: c_int = 0;
+
     #[cfg(any(
         target_os = "freebsd",
         target_os = "openbsd",
@@ -53,6 +54,19 @@ pub mod unix {
     pub const IP_ADD_MEMBERSHIP: c_int = 35;
     #[cfg(any(target_os = "solaris", target_os = "illumos"))]
     pub const IP_ADD_MEMBERSHIP: c_int = 19;
+
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "macos",
+    ))]
+    pub const IP_MULTICAST_IF: c_int = 9;
+    #[cfg(target_os = "linux")]
+    pub const IP_MULTICAST_IF: c_int = 32;
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    pub const IP_MULTICAST_IF: c_int = 16;
 
     #[cfg(any(
         target_os = "solaris",
@@ -84,6 +98,12 @@ pub mod unix {
         )),
     ))]
     pub const SOL_SOCKET: c_int = 1;
+
+    #[cfg(target_os = "linux")]
+    pub const SO_BINDTODEVICE: c_int = 25;
+
+    #[cfg(target_os = "linux")]
+    pub const SO_BINDTOIFINDEX: c_int = 62;
 
     #[cfg(target_os = "macos")]
     pub const FIOCLEX: c_ulong = 0x20006601;
@@ -822,7 +842,9 @@ pub mod windows {
     }
 
     pub const IPPROTO_IP: u32 = 0u32;
+
     pub const IP_ADD_MEMBERSHIP: u32 = 12u32;
+    pub const IP_MULTICAST_IF: u32 = 9u32;
 
     pub const SOL_SOCKET: u32 = 65535;
     pub const SO_REUSEADDR: u32 = 4;

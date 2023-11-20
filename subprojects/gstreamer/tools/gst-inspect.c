@@ -490,7 +490,10 @@ print_object_properties_info (GObject * obj, GObjectClass * obj_class,
           RESET_COLOR);
       first_flag = FALSE;
     }
-    if (param->flags & GST_PARAM_MUTABLE_PLAYING) {
+    if (param->flags & G_PARAM_CONSTRUCT_ONLY) {
+      g_print (", %s%s%s", PROP_ATTR_VALUE_COLOR,
+          _("can be set only at object construction time"), RESET_COLOR);
+    } else if (param->flags & GST_PARAM_MUTABLE_PLAYING) {
       g_print (", %s%s%s", PROP_ATTR_VALUE_COLOR,
           _("changeable in NULL, READY, PAUSED or PLAYING state"), RESET_COLOR);
     } else if (param->flags & GST_PARAM_MUTABLE_PAUSED) {
@@ -924,17 +927,9 @@ print_clocking_info (GstElement * element)
     n_print ("%selement requires a clock%s\n", PROP_VALUE_COLOR, RESET_COLOR);
   }
 
-  if (provides_clock) {
-    GstClock *clock;
 
-    clock = gst_element_get_clock (element);
-    if (clock) {
-      n_print ("%selement provides a clock%s: %s%s%s\n", PROP_VALUE_COLOR,
-          RESET_COLOR, DATATYPE_COLOR, GST_OBJECT_NAME (clock), RESET_COLOR);
-      gst_object_unref (clock);
-    } else
-      n_print ("%selement is supposed to provide a clock but returned NULL%s\n",
-          PROP_VALUE_COLOR, RESET_COLOR);
+  if (provides_clock) {
+    n_print ("%selement provides a clock%s\n", PROP_VALUE_COLOR, RESET_COLOR);
   }
 
   pop_indent ();
@@ -1002,7 +997,6 @@ print_pad_info (GstElement * element)
   pads = element->pads;
   while (pads) {
     gchar *name;
-    GstCaps *caps;
 
     pad = GST_PAD (pads->data);
     pads = g_list_next (pads);
@@ -1025,15 +1019,6 @@ print_pad_info (GstElement * element)
       n_print ("%sPad Template%s: %s'%s'%s\n", PROP_NAME_COLOR, RESET_COLOR,
           PROP_VALUE_COLOR, pad->padtemplate->name_template, RESET_COLOR);
       pop_indent ();
-    }
-
-    caps = gst_pad_get_current_caps (pad);
-    if (caps) {
-      n_print ("%sCapabilities:%s\n", PROP_NAME_COLOR, RESET_COLOR);
-      push_indent ();
-      print_caps (caps, "");    // FIXME
-      pop_indent ();
-      gst_caps_unref (caps);
     }
   }
 

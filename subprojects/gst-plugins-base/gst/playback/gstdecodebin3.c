@@ -702,6 +702,7 @@ gst_decodebin3_dispose (GObject * object)
 
   gst_decodebin3_reset (dbin);
 
+  g_mutex_lock (&dbin->factories_lock);
   if (dbin->factories) {
     gst_plugin_feature_list_free (dbin->factories);
     dbin->factories = NULL;
@@ -714,8 +715,13 @@ gst_decodebin3_dispose (GObject * object)
     g_list_free (dbin->decodable_factories);
     dbin->decodable_factories = NULL;
   }
+  g_mutex_unlock (&dbin->factories_lock);
 
-  gst_clear_object (&dbin->collection);
+  SELECTION_LOCK (dbin);
+  if (dbin->collection) {
+    gst_clear_object (&dbin->collection);
+  }
+  SELECTION_UNLOCK (dbin);
 
   INPUT_LOCK (dbin);
   if (dbin->main_input) {
@@ -2831,7 +2837,9 @@ remove_decoder_link (DecodebinOutputStream * output, MultiQueueSlot * slot)
 {
   GstDecodebin3 *dbin = output->dbin;
 
-  gst_pad_unlink (slot->src_pad, output->decoder_sink);
+  if (gst_pad_is_linked (output->decoder_sink)) {
+    gst_pad_unlink (slot->src_pad, output->decoder_sink);
+  }
   if (output->drop_probe_id) {
     gst_pad_remove_probe (slot->src_pad, output->drop_probe_id);
     output->drop_probe_id = 0;
@@ -2979,6 +2987,7 @@ reconfigure_output_stream (DecodebinOutputStream * output,
               GST_PAD_LINK_CHECK_NOTHING) != GST_PAD_LINK_OK) {
         GST_WARNING_OBJECT (dbin, "could not link to %s:%s",
             GST_DEBUG_PAD_NAME (output->decoder_sink));
+        decoder_failed = TRUE;
         goto try_next;
       }
 

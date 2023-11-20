@@ -89,6 +89,10 @@
 #define DRM_FORMAT_RGB565     fourcc_code('R', 'G', '1', '6')   /* [15:0] R:G:B 5:6:5 little endian */
 #define DRM_FORMAT_BGR565     fourcc_code('B', 'G', '1', '6')   /* [15:0] B:G:R 5:6:5 little endian */
 
+/* 24 bpp RGB */
+#define DRM_FORMAT_RGB888     fourcc_code('R', 'G', '2', '4')   /* [23:0] R:G:B little endian */
+#define DRM_FORMAT_BGR888     fourcc_code('B', 'G', '2', '4')   /* [23:0] B:G:R little endian */
+
 /* 32 bpp RGB */
 #define DRM_FORMAT_ARGB8888   fourcc_code('A', 'R', '2', '4')   /* [31:0] A:R:G:B 8:8:8:8 little endian */
 #define DRM_FORMAT_ABGR8888   fourcc_code('A', 'B', '2', '4')   /* [31:0] A:B:G:R 8:8:8:8 little endian */
@@ -98,6 +102,36 @@
 #define DRM_FORMAT_XBGR8888   fourcc_code('X', 'B', '2', '4')   /* [31:0] x:B:G:R 8:8:8:8 little endian */
 #define DRM_FORMAT_RGBX8888   fourcc_code('R', 'X', '2', '4')   /* [31:0] R:G:B:x 8:8:8:8 little endian */
 #define DRM_FORMAT_BGRX8888   fourcc_code('B', 'X', '2', '4')   /* [31:0] B:G:R:x 8:8:8:8 little endian */
+
+#define DRM_FORMAT_ARGB2101010  fourcc_code('A', 'R', '3', '0') /* [31:0] A:R:G:B 2:10:10:10 little endian */
+
+/*
+ * packed Y4xx indicate for each component, xx valid data occupy msb
+ * 16-xx padding occupy lsb except Y410
+ */
+#define DRM_FORMAT_Y410       fourcc_code('Y', '4', '1', '0')   /* [31:0] A:Cr:Y:Cb 2:10:10:10 little endian */
+#define DRM_FORMAT_Y412       fourcc_code('Y', '4', '1', '2')   /* [63:0] A:0:Cr:0:Y:0:Cb:0 12:4:12:4:12:4:12:4 little endian */
+
+/*
+ * packed Y2xx indicate for each component, xx valid data occupy msb
+ * 16-xx padding occupy lsb
+ */
+#define DRM_FORMAT_Y210       fourcc_code('Y', '2', '1', '0')   /* [63:0] Cr0:0:Y1:0:Cb0:0:Y0:0 10:6:10:6:10:6:10:6 little endian per 2 Y pixels */
+#define DRM_FORMAT_Y212       fourcc_code('Y', '2', '1', '2')   /* [63:0] Cr0:0:Y1:0:Cb0:0:Y0:0 12:4:12:4:12:4:12:4 little endian per 2 Y pixels */
+
+/*
+ * 2 plane YCbCr MSB aligned
+ * index 0 = Y plane, [15:0] Y:x [10:6] little endian
+ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [10:6:10:6] little endian
+ */
+#define DRM_FORMAT_P010       fourcc_code('P', '0', '1', '0')   /* 2x2 subsampled Cr:Cb plane 10 bits per channel */
+
+/*
+ * 2 plane YCbCr MSB aligned
+ * index 0 = Y plane, [15:0] Y:x [12:4] little endian
+ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [12:4:12:4] little endian
+ */
+#define DRM_FORMAT_P012       fourcc_code('P', '0', '1', '2')   /* 2x2 subsampled Cr:Cb plane 12 bits per channel */
 
 /*
  * Linear Layout
@@ -617,6 +651,8 @@ static const struct FormatMap
   {GST_VIDEO_FORMAT_Y444, DRM_FORMAT_YUV444},
   {GST_VIDEO_FORMAT_RGB16, DRM_FORMAT_RGB565},
   {GST_VIDEO_FORMAT_BGR16, DRM_FORMAT_BGR565},
+  {GST_VIDEO_FORMAT_RGB, DRM_FORMAT_BGR888},
+  {GST_VIDEO_FORMAT_BGR, DRM_FORMAT_RGB888},
   {GST_VIDEO_FORMAT_RGBA, DRM_FORMAT_ABGR8888},
   {GST_VIDEO_FORMAT_RGBx, DRM_FORMAT_XBGR8888},
   {GST_VIDEO_FORMAT_BGRA, DRM_FORMAT_ARGB8888},
@@ -625,6 +661,13 @@ static const struct FormatMap
   {GST_VIDEO_FORMAT_xRGB, DRM_FORMAT_BGRX8888},
   {GST_VIDEO_FORMAT_ABGR, DRM_FORMAT_RGBA8888},
   {GST_VIDEO_FORMAT_xBGR, DRM_FORMAT_RGBX8888},
+  {GST_VIDEO_FORMAT_Y410, DRM_FORMAT_Y410},
+  {GST_VIDEO_FORMAT_Y412_LE, DRM_FORMAT_Y412},
+  {GST_VIDEO_FORMAT_Y210, DRM_FORMAT_Y210},
+  {GST_VIDEO_FORMAT_Y212_LE, DRM_FORMAT_Y212},
+  {GST_VIDEO_FORMAT_P010_10LE, DRM_FORMAT_P010},
+  {GST_VIDEO_FORMAT_P012_LE, DRM_FORMAT_P012},
+  {GST_VIDEO_FORMAT_BGR10A2_LE, DRM_FORMAT_ARGB2101010},
 };
 /* *INDENT-ON* */
 

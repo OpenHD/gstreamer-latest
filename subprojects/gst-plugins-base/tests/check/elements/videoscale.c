@@ -132,6 +132,8 @@ check_pad_template (GstPadTemplate * tmpl)
         case GST_VIDEO_FORMAT_NV12_10BE_8L128:
         case GST_VIDEO_FORMAT_NV12_10LE40_4L4:
         case GST_VIDEO_FORMAT_DMA_DRM:
+        case GST_VIDEO_FORMAT_MT2110T:
+        case GST_VIDEO_FORMAT_MT2110R:
           GST_LOG ("Ignoring lack of support for format %s", fmt_str);
           break;
         default:
@@ -191,6 +193,9 @@ videoscale_get_allowed_caps_for_method (int method)
   ret = g_new0 (GstCaps *, n + 1);
 
   for (i = 0; i < n; i++) {
+    /* Skip passthrough caps */
+    if (gst_caps_features_is_any (gst_caps_get_features (caps, i)))
+      continue;
     s = gst_caps_get_structure (caps, i);
     ret[i] = gst_caps_new_empty ();
     gst_caps_append_structure (ret[i], gst_structure_copy (s));

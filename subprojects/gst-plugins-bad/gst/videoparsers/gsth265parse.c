@@ -1645,25 +1645,25 @@ get_level_string (guint8 level_idc)
     return digit_to_string (level_idc / 30);
   else {
     switch (level_idc) {
-      case 63:
+      case GST_H265_LEVEL_L2_1:
         return "2.1";
         break;
-      case 93:
+      case GST_H265_LEVEL_L3_1:
         return "3.1";
         break;
-      case 123:
+      case GST_H265_LEVEL_L4_1:
         return "4.1";
         break;
-      case 153:
+      case GST_H265_LEVEL_L5_1:
         return "5.1";
         break;
-      case 156:
+      case GST_H265_LEVEL_L5_2:
         return "5.2";
         break;
-      case 183:
+      case GST_H265_LEVEL_L6_1:
         return "6.1";
         break;
-      case 186:
+      case GST_H265_LEVEL_L6_2:
         return "6.2";
         break;
       default:
@@ -2910,6 +2910,7 @@ gst_h265_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   GstBuffer *buffer;
   GstEvent *event;
   GstBuffer *parse_buffer = NULL;
+  GstH265SPS *sps;
 
   h265parse = GST_H265_PARSE (parse);
 
@@ -3043,13 +3044,21 @@ gst_h265_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
       break;
   }
 
-  {
+  sps = h265parse->nalparser->last_sps;
+  if (sps && sps->vui_parameters_present_flag &&
+      sps->vui_params.timing_info_present_flag &&
+      sps->vui_params.time_scale > 0 &&
+      sps->vui_params.num_units_in_tick > 0 &&
+      !gst_buffer_get_video_time_code_meta (parse_buffer)) {
     guint i = 0;
+    GstH265VUIParams *vui = &sps->vui_params;
 
     for (i = 0; i < h265parse->time_code.num_clock_ts; i++) {
       gint field_count = -1;
-      guint n_frames;
+      guint64 n_frames_tmp;
+      guint n_frames = G_MAXUINT32;
       GstVideoTimeCodeFlags flags = 0;
+      guint64 scale_n, scale_d;
 
       if (!h265parse->time_code.clock_timestamp_flag[i])
         break;
@@ -3100,21 +3109,53 @@ gst_h265_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
       if (h265parse->sei_pic_struct != GST_H265_SEI_PIC_STRUCT_FRAME)
         flags |= GST_VIDEO_TIME_CODE_FLAGS_INTERLACED;
 
-      n_frames =
-          gst_util_uint64_scale_int (h265parse->time_code.n_frames[i], 1,
-          2 - h265parse->time_code.units_field_based_flag[i]);
+      /* Equation D-26 (without and tOffset)
+       *
+       * clockTimestamp[i] = ( ( hH * 60 + mM ) * 60 + sS ) * vui_time_scale +
+       *                  nFrames * ( vui_num_units_in_tick * ( 1 + unit_field_based_flag[i] ) )
+       * => timestamp = clockTimestamp / time_scale
+       *
+       * <taking only frame part>
+       * timestamp = nFrames * ( vui_num_units_in_tick * ( 1 + unit_field_based_flag ) ) / vui_time_scale
+       *
+       * <timecode's timestamp of frame part>
+       * timecode_timestamp = n_frames * fps_d / fps_n
+       *
+       * <Scaling Equation>
+       * n_frames = nFrames * ( vui_num_units_in_tick * ( 1 + unit_field_based_flag ) ) / vui_time_scale
+       *            * fps_n / fps_d
+       *
+       *                       fps_n * ( vui_num_units_in_tick * ( 1 + unit_field_based_flag ) )
+       *          = nFrames * ------------------------------------------------------------------
+       *                       fps_d * vui_time_scale
+       */
+      scale_n = (guint64) h265parse->parsed_fps_n * vui->num_units_in_tick;
+      scale_d = (guint64) h265parse->parsed_fps_d * vui->time_scale;
 
-      gst_buffer_add_video_time_code_meta_full (parse_buffer,
-          h265parse->parsed_fps_n,
-          h265parse->parsed_fps_d,
-          NULL,
-          flags,
-          h265parse->time_code.hours_flag[i] ? h265parse->time_code.
-          hours_value[i] : 0,
-          h265parse->time_code.minutes_flag[i] ? h265parse->time_code.
-          minutes_value[i] : 0,
-          h265parse->time_code.seconds_flag[i] ? h265parse->time_code.
-          seconds_value[i] : 0, n_frames, field_count);
+      n_frames_tmp =
+          gst_util_uint64_scale_int (h265parse->time_code.n_frames[i], scale_n,
+          scale_d);
+      if (n_frames_tmp <= G_MAXUINT32) {
+        if (h265parse->time_code.units_field_based_flag[i])
+          n_frames_tmp *= 2;
+
+        if (n_frames_tmp <= G_MAXUINT32)
+          n_frames = (guint) n_frames_tmp;
+      }
+
+      if (n_frames != G_MAXUINT32) {
+        gst_buffer_add_video_time_code_meta_full (parse_buffer,
+            h265parse->parsed_fps_n,
+            h265parse->parsed_fps_d,
+            NULL,
+            flags,
+            h265parse->time_code.hours_flag[i] ? h265parse->time_code.
+            hours_value[i] : 0,
+            h265parse->time_code.minutes_flag[i] ? h265parse->time_code.
+            minutes_value[i] : 0,
+            h265parse->time_code.seconds_flag[i] ? h265parse->time_code.
+            seconds_value[i] : 0, n_frames, field_count);
+      }
     }
   }
 

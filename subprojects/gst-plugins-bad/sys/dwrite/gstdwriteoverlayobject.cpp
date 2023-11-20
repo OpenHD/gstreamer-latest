@@ -234,7 +234,8 @@ is_subsampled_yuv (const GstVideoInfo * info)
 
 static GstD3D11Converter *
 gst_dwrite_overlay_object_create_converter (GstDWriteOverlayObject * self,
-    const GstVideoInfo * in_info, const GstVideoInfo * out_info)
+    const GstVideoInfo * in_info, const GstVideoInfo * out_info,
+    gboolean is_blend)
 {
   GstD3D11Converter *ret;
   GstDWriteOverlayObjectPrivate *priv = self->priv;
@@ -249,6 +250,11 @@ gst_dwrite_overlay_object_create_converter (GstDWriteOverlayObject * self,
       GST_D3D11_CONVERTER_BACKEND_SHADER,
       GST_D3D11_CONVERTER_OPT_SAMPLER_FILTER,
       GST_TYPE_D3D11_CONVERTER_SAMPLER_FILTER, filter, nullptr);
+  if (is_blend) {
+    gst_structure_set (config, GST_D3D11_CONVERTER_OPT_SRC_ALPHA_MODE,
+        GST_TYPE_D3D11_CONVERTER_ALPHA_MODE,
+        GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED, nullptr);
+  }
 
   ret = gst_d3d11_converter_new (priv->device, in_info, out_info, config);
   if (!ret)
@@ -352,7 +358,7 @@ gst_dwrite_overlay_object_prepare_resource (GstDWriteOverlayObject * self)
       break;
     case GstDWriteBlendMode::BLEND:
       priv->blend_conv = gst_dwrite_overlay_object_create_converter (self,
-          &priv->bgra_info, &priv->info);
+          &priv->bgra_info, &priv->info, TRUE);
       if (!priv->blend_conv)
         return FALSE;
       break;
@@ -363,17 +369,17 @@ gst_dwrite_overlay_object_prepare_resource (GstDWriteOverlayObject * self)
         return FALSE;
 
       priv->pre_conv = gst_dwrite_overlay_object_create_converter (self,
-          &priv->info, &priv->bgra_info);
+          &priv->info, &priv->bgra_info, FALSE);
       if (!priv->pre_conv)
         return FALSE;
 
       priv->blend_conv = gst_dwrite_overlay_object_create_converter (self,
-          &priv->bgra_info, &priv->bgra_info);
+          &priv->bgra_info, &priv->bgra_info, TRUE);
       if (!priv->blend_conv)
         return FALSE;
 
       priv->post_conv = gst_dwrite_overlay_object_create_converter (self,
-          &priv->bgra_info, &priv->info);
+          &priv->bgra_info, &priv->info, FALSE);
       if (!priv->blend_conv)
         return FALSE;
       break;
@@ -389,17 +395,17 @@ gst_dwrite_overlay_object_prepare_resource (GstDWriteOverlayObject * self)
         return FALSE;
 
       priv->pre_conv = gst_dwrite_overlay_object_create_converter (self,
-          &priv->info, &blend_info);
+          &priv->info, &blend_info, FALSE);
       if (!priv->pre_conv)
         return FALSE;
 
       priv->blend_conv = gst_dwrite_overlay_object_create_converter (self,
-          &priv->bgra_info, &blend_info);
+          &priv->bgra_info, &blend_info, TRUE);
       if (!priv->pre_conv)
         return FALSE;
 
       priv->post_conv = gst_dwrite_overlay_object_create_converter (self,
-          &blend_info, &priv->info);
+          &blend_info, &priv->info, FALSE);
       if (!priv->post_conv)
         return FALSE;
 
@@ -433,9 +439,7 @@ gst_dwrite_overlay_object_prepare_resource (GstDWriteOverlayObject * self)
       return FALSE;
     }
 
-    g_object_set (priv->blend_conv, "blend-state", blend.Get (),
-        "src-alpha-mode", GST_D3D11_CONVERTER_ALPHA_MODE_PREMULTIPLIED,
-        nullptr);
+    g_object_set (priv->blend_conv, "blend-state", blend.Get (), nullptr);
   }
 
   return TRUE;
@@ -1124,10 +1128,8 @@ gst_dwrite_overlay_object_draw_layout (GstDWriteOverlayObject * self,
       return FALSE;
     }
 
-    gst_d3d11_device_lock (priv->device);
     if (!gst_dwrite_overlay_object_get_target_from_d3d11 (self, mem, &target)) {
       GST_ERROR_OBJECT (self, "Couldn't get target from texture");
-      gst_d3d11_device_unlock (priv->device);
       gst_memory_unmap (mem, &info);
       gst_clear_buffer (&priv->layout_buf);
       return FALSE;
@@ -1140,10 +1142,13 @@ gst_dwrite_overlay_object_draw_layout (GstDWriteOverlayObject * self,
       D2D1::Rect (0, 0, width, height), layout, target.Get ());
   target->EndDraw ();
 
-  if (!priv->use_bitmap) {
-    gst_d3d11_device_unlock (priv->device);
+  /* Release render target before unmapping. Otherwise pending GPU operations
+   * can be executed after releasing keyed-mutex, if texture was allocated with
+   * keyed-mutex enabled */
+  target = nullptr;
+
+  if (!priv->use_bitmap)
     gst_memory_unmap (mem, &info);
-  }
 
   priv->overlay_rect = gst_video_overlay_rectangle_new_raw (priv->layout_buf,
       x, y, width, height, GST_VIDEO_OVERLAY_FORMAT_FLAG_PREMULTIPLIED_ALPHA);
@@ -1241,7 +1246,6 @@ gst_dwrite_overlay_mode_convert (GstDWriteOverlayObject * self,
     return FALSE;
   }
 
-  gst_d3d11_device_lock (priv->device);
   if (!gst_d3d11_converter_convert_buffer_unlocked (priv->pre_conv,
           buffer, pre_buf)) {
     GST_ERROR_OBJECT (self, "pre-convert failed");
@@ -1260,13 +1264,11 @@ gst_dwrite_overlay_mode_convert (GstDWriteOverlayObject * self,
     goto error;
   }
 
-  gst_d3d11_device_unlock (priv->device);
   gst_buffer_unref (pre_buf);
 
   return TRUE;
 
 error:
-  gst_d3d11_device_unlock (priv->device);
   gst_clear_buffer (&pre_buf);
   return FALSE;
 }
@@ -1278,8 +1280,11 @@ gst_dwrite_overlay_object_draw (GstDWriteOverlayObject * object,
   GstDWriteOverlayObjectPrivate *priv = object->priv;
   gboolean ret = FALSE;
 
+  if (priv->device)
+    gst_d3d11_device_lock (priv->device);
+
   if (!gst_dwrite_overlay_object_draw_layout (object, layout, x, y))
-    return FALSE;
+    goto out;
 
   switch (priv->blend_mode) {
     case GstDWriteBlendMode::ATTACH_TEXTURE:
@@ -1298,8 +1303,11 @@ gst_dwrite_overlay_object_draw (GstDWriteOverlayObject * object,
       break;
     default:
       g_assert_not_reached ();
-      return FALSE;
+      break;
   }
 
+out:
+  if (priv->device)
+    gst_d3d11_device_unlock (priv->device);
   return ret;
 }

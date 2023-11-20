@@ -439,14 +439,14 @@ const static struct {
   VkFormat vkfrmts[GST_VIDEO_MAX_PLANES];
 } vk_formats_map[] = {
   /* RGB                                                     transfer sRGB */
-  { GST_VIDEO_FORMAT_RGBx,  VK_FORMAT_R8G8B8A8_SRGB,       { VK_FORMAT_R8G8B8A8_UNORM, } },
   { GST_VIDEO_FORMAT_RGBA,  VK_FORMAT_R8G8B8A8_SRGB,       { VK_FORMAT_R8G8B8A8_UNORM, } },
-  { GST_VIDEO_FORMAT_BGRx,  VK_FORMAT_B8G8R8A8_SRGB,       { VK_FORMAT_B8G8R8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_RGBx,  VK_FORMAT_R8G8B8A8_SRGB,       { VK_FORMAT_R8G8B8A8_UNORM, } },
   { GST_VIDEO_FORMAT_BGRA,  VK_FORMAT_B8G8R8A8_SRGB,       { VK_FORMAT_B8G8R8A8_UNORM, } },
-  { GST_VIDEO_FORMAT_xRGB,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_BGRx,  VK_FORMAT_B8G8R8A8_SRGB,       { VK_FORMAT_B8G8R8A8_UNORM, } },
   { GST_VIDEO_FORMAT_ARGB,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
-  { GST_VIDEO_FORMAT_xBGR,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_xRGB,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
   { GST_VIDEO_FORMAT_ABGR,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_xBGR,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
   { GST_VIDEO_FORMAT_RGB,   VK_FORMAT_R8G8B8_UNORM,        { VK_FORMAT_UNDEFINED, } },
   { GST_VIDEO_FORMAT_BGR,   VK_FORMAT_B8G8R8_UNORM,        { VK_FORMAT_UNDEFINED, } },
   { GST_VIDEO_FORMAT_RGB16, VK_FORMAT_R5G6B5_UNORM_PACK16, { VK_FORMAT_UNDEFINED, } },
@@ -493,10 +493,13 @@ gst_vulkan_format_from_video_info (GstVideoInfo * v_info, guint plane)
     if (vk_formats_map[i].format != GST_VIDEO_INFO_FORMAT (v_info))
       continue;
 
-    if (GST_VIDEO_INFO_IS_RGB (v_info) &&
-        (GST_VIDEO_INFO_COLORIMETRY (v_info).transfer ==
-            GST_VIDEO_TRANSFER_SRGB)) {
-      return vk_formats_map[i].vkfrmts[0];
+    if (GST_VIDEO_INFO_IS_RGB (v_info)) {
+      if (GST_VIDEO_INFO_COLORIMETRY (v_info).transfer ==
+          GST_VIDEO_TRANSFER_SRGB) {
+        return vk_formats_map[i].vkfrmt;
+      } else {
+        return vk_formats_map[i].vkfrmts[0];
+      }
     } else if (GST_VIDEO_INFO_IS_YUV (v_info) &&
         GST_VIDEO_INFO_N_PLANES (v_info) > plane) {
       return vk_formats_map[i].vkfrmts[plane];
@@ -528,7 +531,7 @@ _get_usage (guint64 feature)
     {VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT_KHR, VK_IMAGE_USAGE_TRANSFER_DST_BIT},
     {VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT_KHR, VK_IMAGE_USAGE_STORAGE_BIT},
     {VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT_KHR,
-          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT},
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT},
 #if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
     {VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR,
           VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR},
@@ -580,7 +583,8 @@ _get_usage (guint64 feature)
 gboolean
 gst_vulkan_format_from_video_info_2 (GstVulkanPhysicalDevice * physical_device,
     GstVideoInfo * info, VkImageTiling tiling, gboolean no_multiplane,
-    VkFormat fmts[GST_VIDEO_MAX_PLANES], int *n_imgs, VkImageUsageFlags * usage)
+    VkImageUsageFlags requested_usage, VkFormat fmts[GST_VIDEO_MAX_PLANES],
+    int *n_imgs, VkImageUsageFlags * usage_ret)
 {
   int i;
 #if (defined(VK_VERSION_1_3) || defined(VK_VERSION_1_2) && VK_HEADER_VERSION >= 195)
@@ -609,6 +613,7 @@ gst_vulkan_format_from_video_info_2 (GstVulkanPhysicalDevice * physical_device,
   for (i = 0; i < G_N_ELEMENTS (vk_formats_map); i++) {
     gboolean basics_primary = FALSE, basics_secondary = FALSE;
     guint64 feats_primary = 0, feats_secondary = 0;
+    VkImageUsageFlags usage = 0;
 
     if (vk_formats_map[i].format != GST_VIDEO_INFO_FORMAT (info))
       continue;
@@ -646,50 +651,69 @@ gst_vulkan_format_from_video_info_2 (GstVulkanPhysicalDevice * physical_device,
     }
 
     if (GST_VIDEO_INFO_IS_RGB (info)) {
-      if (basics_primary && GST_VIDEO_INFO_COLORIMETRY (info).transfer !=
-          GST_VIDEO_TRANSFER_SRGB) {
-        if (fmts)
-          fmts[0] = vk_formats_map[i].vkfrmt;
-        if (n_imgs)
-          *n_imgs = 1;
-        if (usage)
-          *usage = _get_usage (feats_primary);
-      } else if (basics_secondary
-          && GST_VIDEO_INFO_COLORIMETRY (info).transfer ==
-          GST_VIDEO_TRANSFER_SRGB) {
-        if (fmts)
-          fmts[0] = vk_formats_map[i].vkfrmts[0];
-        if (n_imgs)
-          *n_imgs = 1;
-        if (usage)
-          *usage = _get_usage (feats_secondary);
-      } else {
-        return FALSE;
-      }
-    } else {
-      if (basics_primary && !(no_multiplane
-              && GST_VIDEO_INFO_N_PLANES (info) > 1)) {
-        if (fmts)
-          fmts[0] = vk_formats_map[i].vkfrmt;
-        if (n_imgs)
-          *n_imgs = 1;
-        if (usage)
-          *usage = _get_usage (feats_primary);
-      } else if (basics_secondary) {
-        if (fmts) {
-          memcpy (fmts, vk_formats_map[i].vkfrmts,
-              GST_VIDEO_MAX_PLANES * sizeof (VkFormat));
+      if (basics_primary && (GST_VIDEO_INFO_COLORIMETRY (info).transfer ==
+              GST_VIDEO_TRANSFER_SRGB
+              || GST_VIDEO_INFO_COLORIMETRY (info).transfer ==
+              GST_VIDEO_TRANSFER_UNKNOWN)) {
+        usage = _get_usage (feats_primary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts)
+            fmts[0] = vk_formats_map[i].vkfrmt;
+          if (n_imgs)
+            *n_imgs = 1;
+          if (usage_ret)
+            *usage_ret = usage;
+          return TRUE;
         }
-        if (n_imgs)
-          *n_imgs = GST_VIDEO_INFO_N_PLANES (info);
-        if (usage)
-          *usage = _get_usage (feats_secondary);
-      } else {
-        return FALSE;
       }
-    }
 
-    return TRUE;
+      if (basics_secondary
+          && GST_VIDEO_INFO_COLORIMETRY (info).transfer !=
+          GST_VIDEO_TRANSFER_SRGB) {
+        usage = _get_usage (feats_secondary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts)
+            fmts[0] = vk_formats_map[i].vkfrmts[0];
+          if (n_imgs)
+            *n_imgs = 1;
+          if (usage_ret)
+            *usage_ret = usage;
+          return TRUE;
+        }
+      }
+      return FALSE;
+    } else {
+      if (basics_primary && !no_multiplane
+          && GST_VIDEO_INFO_N_PLANES (info) > 1) {
+        usage = _get_usage (feats_primary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts)
+            fmts[0] = vk_formats_map[i].vkfrmt;
+          if (n_imgs)
+            *n_imgs = 1;
+          if (usage_ret)
+            *usage_ret = usage;
+          return TRUE;
+        }
+      }
+
+      if (basics_secondary) {
+        usage = _get_usage (feats_secondary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts) {
+            memcpy (fmts, vk_formats_map[i].vkfrmts,
+                GST_VIDEO_MAX_PLANES * sizeof (VkFormat));
+          }
+          if (n_imgs)
+            *n_imgs = GST_VIDEO_INFO_N_PLANES (info);
+          if (usage_ret)
+            *usage_ret = usage;
+
+          return TRUE;
+        }
+      }
+      return FALSE;
+    }
   }
 
   return FALSE;
