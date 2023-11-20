@@ -1053,6 +1053,15 @@ gst_kms_sink_start (GstBaseSink * bsink)
   if (!res)
     goto resources_failed;
 
+  ret = drmSetClientCap (self->fd, DRM_CLIENT_CAP_ATOMIC, 1);
+  if (ret) {
+    self->atomic_modesetting = FALSE;
+    GST_DEBUG_OBJECT (self, "No atomic modesetting support");
+  } else {
+    GST_DEBUG_OBJECT (self, "Atomic modesetting support enabled");
+    self->atomic_modesetting = TRUE;
+  }
+
   if (self->conn_id == -1)
     conn = find_main_monitor (self->fd, res);
   else
@@ -1989,9 +1998,11 @@ retry_set_plane:
     if (self->can_scale) {
       self->can_scale = FALSE;
       goto retry_set_plane;
-    }
-    goto set_plane_failed;
-  }
+     }
+     goto set_plane_failed;
+  } else if (self->atomic_modesetting) {
+    goto is_synchronous_set_plane;
+   }
 
 sync_frame:
   /* Wait for the previous frame to complete redraw */
@@ -2001,6 +2012,7 @@ sync_frame:
   }
 
   /* Save the rendered buffer and its metadata in case a redraw is needed */
+  is_synchronous_set_plane:
   if (buffer != self->last_buffer) {
     gst_buffer_replace (&self->last_buffer, buffer);
     self->last_width = GST_VIDEO_SINK_WIDTH (self);
