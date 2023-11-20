@@ -7,8 +7,7 @@ sudo apt install -y python3-pip
 sudo pip3 install --upgrade cloudsmith-cli
 sudo pip3 install meson
 bash install_build_dep.sh
-meson setup builddir
-meson --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good:qt5=enabled build 
+meson setup --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good:qt5=enabled build 
 ninja build
 
 mkdir -p /opt/out/
