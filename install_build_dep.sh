@@ -9,6 +9,4 @@ apt -y install qml-module-qtquick-controls2 libqt5concurrent5 libqt5core5a libqt
 
 echo "deb http://deb.debian.org/debian bullseye-backports main" >> /etc/apt/sources.list
 apt update
-apt -y install meson ninja
-
 gem install fpm
