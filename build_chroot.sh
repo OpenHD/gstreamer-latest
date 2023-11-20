@@ -3,7 +3,7 @@
 #We're using cloudsmith-cli to upload the file in CHROOT
 
 sudo apt remove meson
-sudo apt install -y python3-pip
+sudo apt install -y python3-pip libdrm-dev
 sudo pip3 install --upgrade cloudsmith-cli
 sudo pip3 install meson
 bash install_build_dep.sh
