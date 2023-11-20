@@ -2,7 +2,7 @@
 #This file is the install instruction for the CHROOT build
 #We're using cloudsmith-cli to upload the file in CHROOT
 
-sudo apt install -y python3-pip
+sudo apt install -y python3-pip meson
 sudo pip3 install --upgrade cloudsmith-cli
 ls -a
 bash install_build_dep.sh
@@ -19,5 +19,5 @@ ls -a
 API_KEY=$(cat cloudsmith_api_key.txt)
 DISTRO=$(cat distro.txt)
 FLAVOR=$(cat flavor.txt)
-cloudsmith push deb --api-key "$API_KEY" openhd/openhd-2-3-evo/${DISTRO}/${FLAVOR} *.deb || exit 1
+cloudsmith push deb --api-key "$API_KEY" openhd/dev-release/${DISTRO}/${FLAVOR} *.deb || exit 1
 
