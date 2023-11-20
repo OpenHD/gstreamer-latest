@@ -8,8 +8,8 @@ sudo pip3 install --upgrade cloudsmith-cli
 sudo pip3 install meson
 bash install_build_dep.sh
 meson setup --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good:qt5=enabled build 
-ninja build
-
+cd build
+ninja
 mkdir -p /opt/out/
 cp -v *.dep /opt/out/
 echo "copied deb file"
