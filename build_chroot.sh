@@ -2,12 +2,14 @@
 #This file is the install instruction for the CHROOT build
 #We're using cloudsmith-cli to upload the file in CHROOT
 
-sudo apt install -y python3-pip meson
+sudo apt remove meson
+sudo apt install -y python3-pip
 sudo pip3 install --upgrade cloudsmith-cli
-ls -a
+sudo pip3 install meson
 bash install_build_dep.sh
+meson setup builddir
 meson --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good:qt5=enabled build 
-ninja -c build
+ninja build
 
 mkdir -p /opt/out/
 cp -v *.dep /opt/out/
