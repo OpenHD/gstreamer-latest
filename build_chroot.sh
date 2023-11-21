@@ -10,7 +10,7 @@ meson setup --prefix=/tmp/gst-plugins-good/usr -Dgood=enabled -Dgst-plugins-good
 cd build
 ninja
 ninja install
-fpm -a armhf -s dir -t deb -n gst-latest -v 2.5-evo-$(date '+%m%d%H%M') -C /tmp/gst-plugins-good -p gst-latest-1.22.deb
+fpm -a arm64 -s dir -t deb -n gst-latest -v 2.5-evo-$(date '+%m%d%H%M') -C /tmp/gst-plugins-good -p gst-latest-1.22.deb
 mkdir -p /opt/out/
 cp -v *.deb /opt/out/
 echo "copied deb file"
