@@ -1,7 +1,6 @@
 #!/bin/bash
 #This file is the install instruction for the CHROOT build
 #We're using cloudsmith-cli to upload the file in CHROOT
-ls -a
 sudo apt remove meson
 sudo apt install -y python3-pip libdrm-dev
 sudo pip3 install --upgrade cloudsmith-cli
@@ -15,11 +14,13 @@ cd build
 touch gst-latest-1.22.deb
 mkdir -p /opt/out/
 cp -v *.deb /opt/out/
+cp -v *.txt /opt/out/
 echo "copied deb file"
 echo "push to cloudsmith"
 git describe --exact-match HEAD >/dev/null 2>&1
 echo "Pushing the package to OpenHD 2.3 repository"
 ls -a
+echo $PWD
 API_KEY=$(cat cloudsmith_api_key.txt)
 DISTRO=$(cat distro.txt)
 FLAVOR=$(cat flavor.txt)
