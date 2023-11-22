@@ -6,7 +6,7 @@ sudo apt install -y python3-pip libdrm-dev
 sudo pip3 install --upgrade cloudsmith-cli
 sudo pip3 install meson
 bash install_build_dep.sh
-meson setup --prefix=/tmp/gst-plugins-good/usr -Dauto_features=disabled -Dgstreamer:tools=enabled -Dgst-full-plugins=coreelements -Dgood=enabled -Dgst-plugins-good:qt5=enabled build 
+meson setup --prefix=/tmp/gst-plugins-good/usr -Dauto_features=disabled -Dgstreamer:tools=enabled -Dgst-full-plugins=coreelements -Dgood=enabled-Dbad=enabled -Dgst-plugins -bad:kmssnik=enable -Dgst-plugins-good:qt5=enabled build 
 cd build
 ninja
 ninja install
